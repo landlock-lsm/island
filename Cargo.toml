@@ -1,0 +1,16 @@
+[package]
+name = "island"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT OR Apache-2.0"
+homepage = "https://landlock.io"
+repository = "https://github.com/landlock-lsm/landlockconfig"
+keywords = ["access-control", "linux", "sandbox", "security"]
+exclude = [".gitignore"]
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+landlock = "0.4.3"
+landlockconfig = { git = "https://github.com/landlock-lsm/landlockconfig", rev = "8b6b59b339181f9fa1ec6f7889564ba154c1a47d" }
+thiserror = "2.0"
