@@ -6,12 +6,27 @@ use landlockconfig::{
     BuildRulesetError, Config, ConfigFormat, ParseDirectoryError, ResolveError, ResolvedConfig,
 };
 use std::{
+    fmt::Display,
     io::{Error, ErrorKind},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::Command,
 };
 use thiserror::Error;
+
+struct Verbose(bool);
+
+impl Verbose {
+    fn print<F, T>(&self, f: F)
+    where
+        F: FnOnce() -> T,
+        T: Display,
+    {
+        if self.0 {
+            println!("{}", f());
+        }
+    }
+}
 
 #[derive(Subcommand)]
 enum Commands {
@@ -56,6 +71,14 @@ enum Commands {
     version
 )]
 struct Cli {
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Enable verbose output showing execution steps"
+    )]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -81,7 +104,7 @@ enum IslandError {
     Ruleset(#[from] RulesetError),
 }
 
-fn load_profile(profile_dir: &Path) -> Result<ResolvedConfig, IslandError> {
+fn load_profile(profile_dir: &Path, verbose: &Verbose) -> Result<ResolvedConfig, IslandError> {
     let landlock_dir = profile_dir.join("landlock");
 
     let landlock_metadata =
@@ -99,12 +122,26 @@ fn load_profile(profile_dir: &Path) -> Result<ResolvedConfig, IslandError> {
         .into());
     }
 
+    verbose.print(|| {
+        format!(
+            "Loading Landlock configuration from: {}",
+            landlock_dir.display()
+        )
+    });
     Ok(Config::parse_directory(&landlock_dir, ConfigFormat::Toml)?.resolve()?)
 }
 
-fn run(profile_dir: &Path, command_args: &[String]) -> Result<(), IslandError> {
-    let landlock_config = load_profile(profile_dir)?;
+fn run(profile_dir: &Path, command_args: &[String], verbose: &Verbose) -> Result<(), IslandError> {
+    verbose.print(|| {
+        format!(
+            "Running command with profile directory: {}",
+            profile_dir.display()
+        )
+    });
+    verbose.print(|| format!("Command: {:?}", command_args));
+    let landlock_config = load_profile(profile_dir, verbose)?;
 
+    verbose.print(|| "Applying Landlock sandbox restrictions...");
     let (ruleset, rule_errors) = landlock_config.build_ruleset()?;
 
     for rule_error in rule_errors {
@@ -113,10 +150,13 @@ fn run(profile_dir: &Path, command_args: &[String]) -> Result<(), IslandError> {
 
     ruleset.restrict_self()?;
 
+    verbose.print(|| "Landlock sandbox restrictions applied successfully.");
+
     // TODO: Apply environment variable modifications from profile
     // TODO: Parse and apply --env arguments
 
     // Clap ensures command_args contains at least one element due to num_args = 1..
+    verbose.print(|| format!("Executing: {}", command_args[0]));
     Err(IslandError::Io(
         // Inherits all file descriptors.  This may include TTY FD that could be
         // used to escape the sandbox.
@@ -129,8 +169,9 @@ fn run(profile_dir: &Path, command_args: &[String]) -> Result<(), IslandError> {
 
 fn main() -> Result<(), IslandError> {
     let cli = Cli::parse();
+    let verbose = Verbose(cli.verbose);
 
     match cli.command {
-        Commands::Run { profile, command } => run(&profile, &command),
+        Commands::Run { profile, command } => run(&profile, &command, &verbose),
     }
 }
