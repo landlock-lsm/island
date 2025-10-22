@@ -2,17 +2,12 @@
 
 use clap::{Parser, Subcommand};
 use landlock::RulesetError;
-use landlockconfig::{
-    BuildRulesetError, Config, ConfigFormat, ParseDirectoryError, ResolveError, ResolvedConfig,
-};
-use std::{
-    fmt::Display,
-    io::{Error, ErrorKind},
-    os::unix::process::CommandExt,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
+use std::{fmt::Display, os::unix::process::CommandExt, process::Command};
 use thiserror::Error;
+
+mod config;
+use config::{ConfigError, IslandConfig, ResolvedProfile};
 
 struct Verbose(bool);
 
@@ -33,19 +28,19 @@ enum Commands {
     #[command(
         about = "Execute a command in a sandboxed environment",
         long_about = "Run a command with Landlock security restrictions applied based on the \
-            specified profile configuration. The profile directory must contain a \"landlock\" \
-            subdirectory with TOML configuration files defining the sandbox rules."
+            specified profile configuration. The profile directory contains TOML configuration \
+            files defining the sandbox rules."
     )]
     Run {
         #[arg(
             short,
             long,
-            help = "Profile directory containing the sandbox configuration",
-            long_help = "Path to the profile directory that contains a \"landlock\" subdirectory \
-                with TOML configuration files. These files define the filesystem and network \
-                access rules for the sandbox."
+            help = "Profile name to use for sandbox configuration",
+            long_help = "Name of the profile to use for sandboxing. Can be specified multiple times \
+                to apply multiple profiles in order. If any -p is provided, automatic profile \
+                resolution based on current working directory is disabled."
         )]
-        profile: PathBuf,
+        profile: Vec<String>,
 
         #[arg(
             trailing_var_arg = true,
@@ -89,10 +84,10 @@ enum IslandError {
     BuildRuleset(#[from] BuildRulesetError),
 
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Config(#[from] ConfigError),
 
-    #[error("Landlock configuration directory not found: {path}")]
-    LandlockConfigNotFound { path: String },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 
     #[error(transparent)]
     LandlockConfig(#[from] ParseDirectoryError),
@@ -104,53 +99,32 @@ enum IslandError {
     Ruleset(#[from] RulesetError),
 }
 
-fn load_profile(profile_dir: &Path, verbose: &Verbose) -> Result<ResolvedConfig, IslandError> {
-    let landlock_dir = profile_dir.join("landlock");
-
-    let landlock_metadata =
-        landlock_dir
-            .metadata()
-            .map_err(|_| IslandError::LandlockConfigNotFound {
-                path: landlock_dir.display().to_string(),
-            })?;
-
-    if !landlock_metadata.is_dir() {
-        return Err(Error::new(
-            ErrorKind::NotADirectory,
-            format!("Path is not a directory: {}", landlock_dir.display()),
-        )
-        .into());
-    }
-
+fn run(
+    resolved_profiles: Vec<ResolvedProfile>,
+    command_args: &[String],
+    verbose: &Verbose,
+) -> Result<(), IslandError> {
     verbose.print(|| {
         format!(
-            "Loading Landlock configuration from: {}",
-            landlock_dir.display()
+            "Using {} profile(s): {}",
+            resolved_profiles.len(),
+            resolved_profiles
+                .iter()
+                .map(|p| p.name.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     });
-    Ok(Config::parse_directory(&landlock_dir, ConfigFormat::Toml)?.resolve()?)
-}
 
-fn run(profile_dir: &Path, command_args: &[String], verbose: &Verbose) -> Result<(), IslandError> {
-    verbose.print(|| {
-        format!(
-            "Running command with profile directory: {}",
-            profile_dir.display()
-        )
-    });
-    verbose.print(|| format!("Command: {:?}", command_args));
-    let landlock_config = load_profile(profile_dir, verbose)?;
-
-    verbose.print(|| "Applying Landlock sandbox restrictions...");
-    let (ruleset, rule_errors) = landlock_config.build_ruleset()?;
-
-    for rule_error in rule_errors {
-        eprintln!("Warning: {}", rule_error);
+    // Apply each profile's restrictions in order (broadest scope first).
+    for resolved_profile in resolved_profiles {
+        let (ruleset, rule_errors) = resolved_profile.config.build_ruleset()?;
+        for rule_error in rule_errors {
+            eprintln!("Warning: {}", rule_error);
+        }
+        // TODO: Do not rely on the kernel to enforce nested sandboxing (limited to 16 layers).
+        ruleset.restrict_self()?;
     }
-
-    ruleset.restrict_self()?;
-
-    verbose.print(|| "Landlock sandbox restrictions applied successfully.");
 
     // TODO: Apply environment variable modifications from profile
     // TODO: Parse and apply --env arguments
@@ -172,6 +146,27 @@ fn main() -> Result<(), IslandError> {
     let verbose = Verbose(cli.verbose);
 
     match cli.command {
-        Commands::Run { profile, command } => run(&profile, &command, &verbose),
+        Commands::Run { profile, command } => {
+            let island_config = IslandConfig::load()?;
+
+            let resolved_profiles = if !profile.is_empty() {
+                // Use explicit profiles - no CWD inference.
+                verbose.print(|| format!("Using explicit profiles: {:?}", profile));
+                island_config.resolve_profiles_by_names(&profile)?
+            } else {
+                // Use automatic profile resolution based on CWD.
+                let canonicalized_cwd = std::env::current_dir()?.canonicalize()?;
+                island_config.resolve_profiles_by_path(
+                    canonicalized_cwd,
+                    |name| -> Result<ResolvedConfig, ConfigError> {
+                        island_config
+                            .load_landlock_config(name)
+                            .map_err(|e| e.into())
+                    },
+                )?
+            };
+
+            run(resolved_profiles, &command, &verbose)
+        }
     }
 }
