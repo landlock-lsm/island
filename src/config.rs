@@ -64,7 +64,7 @@ struct TomlConfig {
 pub struct ProfileEntry {
     // TODO: Restrict name.
     pub name: String,
-    pub when_beneath: PathBuf,
+    pub when_beneath: Option<PathBuf>,
 }
 
 type Profiles = BTreeMap<String, ProfileEntry>;
@@ -103,15 +103,19 @@ impl IslandConfig {
         for mut profile in main_config.profiles {
             // Canonicalize the when_beneath path to resolve symlinks and ignore
             // profiles with non-existing directories.
-            if let Ok(canonical_path) = profile.when_beneath.canonicalize() {
-                profile.when_beneath = canonical_path;
-                profiles.insert(profile.name.clone(), profile);
+            if let Some(when_beneath) = &profile.when_beneath {
+                if let Ok(canonical_path) = when_beneath.canonicalize() {
+                    profile.when_beneath = Some(canonical_path);
+                    profiles.insert(profile.name.clone(), profile);
+                } else {
+                    eprintln!(
+                        "Warning: ignoring profile \"{}\" because of non-existing directory \"{}\"",
+                        profile.name,
+                        when_beneath.display()
+                    );
+                }
             } else {
-                eprintln!(
-                    "Warning: ignoring profile \"{}\" because of non-existing directory \"{}\"",
-                    profile.name,
-                    profile.when_beneath.display()
-                );
+                profiles.insert(profile.name.clone(), profile);
             }
         }
         Ok(profiles)
@@ -137,8 +141,15 @@ impl IslandConfig {
         let matching_profiles: BTreeMap<&PathBuf, &ProfileEntry> = self
             .profiles
             .values()
-            .filter(|profile| canonicalized_path.starts_with(&profile.when_beneath))
-            .map(|profile| (&profile.when_beneath, profile))
+            .filter_map(|profile| {
+                profile.when_beneath.as_ref().and_then(|when_beneath| {
+                    if canonicalized_path.starts_with(when_beneath) {
+                        Some((when_beneath, profile))
+                    } else {
+                        None
+                    }
+                })
+            })
             .collect();
 
         if matching_profiles.is_empty() {
@@ -182,10 +193,16 @@ impl IslandConfig {
     }
 
     /// Resolve profiles by explicit profile names.
-    pub fn resolve_profiles_by_names(
+    /// The closure `load_config` is called for each profile name to load its configuration.
+    pub fn resolve_profiles_by_names<F, E>(
         &self,
         profile_names: &[String],
-    ) -> Result<Vec<ResolvedProfile>, ConfigError> {
+        load_config: F,
+    ) -> Result<Vec<ResolvedProfile>, ConfigError>
+    where
+        F: Fn(&str) -> Result<ResolvedConfig, E>,
+        E: Into<ConfigError>,
+    {
         let mut resolved = Vec::new();
 
         for profile_name in profile_names {
@@ -197,7 +214,7 @@ impl IslandConfig {
 
             resolved.push(ResolvedProfile {
                 name: profile_name.to_string(),
-                config: self.load_landlock_config(profile_name)?,
+                config: load_config(profile_name).map_err(|e| e.into())?,
             });
         }
 
@@ -223,6 +240,9 @@ when_beneath = "/home/user/projects"
 [[profile]]
 name = "work1"
 when_beneath = "/home/user/projects/work1"
+
+[[profile]]
+name = "standalone"
 "#;
 
         // Parse TOML directly without canonicalization for tests.
@@ -271,7 +291,7 @@ scoped = ["signal"]
 
         let result = config.resolve_profiles_by_path(
             "/home/user/projects",
-            |_: &str| -> Result<ResolvedConfig, ConfigError> { Ok(create_mock_resolved_config()) },
+            |_| -> Result<ResolvedConfig, ConfigError> { Ok(create_mock_resolved_config()) },
         );
 
         assert!(matches!(
@@ -306,7 +326,7 @@ scoped = ["signal"]
         // Test path that matches no profiles.
         let result = config.resolve_profiles_by_path(
             "/home/bob/projects",
-            |_: &str| -> Result<ResolvedConfig, ConfigError> {
+            |_| -> Result<ResolvedConfig, ConfigError> {
                 panic!("Closure should not be called when no profiles match")
             },
         );
@@ -314,5 +334,35 @@ scoped = ["signal"]
         assert!(
             matches!(result, Err(ConfigError::NoProfileForDirectory { cwd }) if cwd == "/home/bob/projects")
         );
+    }
+
+    #[test]
+    fn test_resolve_profiles_by_names_with_optional_when_beneath() {
+        let config = create_test_config();
+
+        // Test resolving profiles without when_beneath using resolve_profiles_by_names.
+        let result = config.resolve_profiles_by_names(
+            &["standalone".to_string()],
+            |_| -> Result<ResolvedConfig, ConfigError> { Ok(create_mock_resolved_config()) },
+        );
+
+        assert!(matches!(
+            result.as_deref(),
+            Ok([ResolvedProfile { name, .. }]) if name == "standalone"
+        ));
+
+        // Test resolving mixed profiles (with and without when_beneath).
+        let result = config.resolve_profiles_by_names(
+            &["home".to_string(), "standalone".to_string()],
+            |_| -> Result<ResolvedConfig, ConfigError> { Ok(create_mock_resolved_config()) },
+        );
+
+        assert!(matches!(
+            result.as_deref(),
+            Ok([
+                ResolvedProfile { name, .. },
+                ResolvedProfile { name: name2, .. }
+            ]) if name == "home" && name2 == "standalone"
+        ));
     }
 }

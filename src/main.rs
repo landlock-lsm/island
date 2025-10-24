@@ -148,22 +148,20 @@ fn main() -> Result<(), IslandError> {
     match cli.command {
         Commands::Run { profile, command } => {
             let island_config = IslandConfig::load()?;
+            let load_config = |name: &str| -> Result<ResolvedConfig, ConfigError> {
+                island_config
+                    .load_landlock_config(name)
+                    .map_err(|e| e.into())
+            };
 
             let resolved_profiles = if !profile.is_empty() {
                 // Use explicit profiles - no CWD inference.
                 verbose.print(|| format!("Using explicit profiles: {:?}", profile));
-                island_config.resolve_profiles_by_names(&profile)?
+                island_config.resolve_profiles_by_names(&profile, load_config)?
             } else {
                 // Use automatic profile resolution based on CWD.
                 let canonicalized_cwd = std::env::current_dir()?.canonicalize()?;
-                island_config.resolve_profiles_by_path(
-                    canonicalized_cwd,
-                    |name| -> Result<ResolvedConfig, ConfigError> {
-                        island_config
-                            .load_landlock_config(name)
-                            .map_err(|e| e.into())
-                    },
-                )?
+                island_config.resolve_profiles_by_path(canonicalized_cwd, load_config)?
             };
 
             run(resolved_profiles, &command, &verbose)
