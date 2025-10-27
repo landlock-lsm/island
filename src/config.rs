@@ -80,7 +80,9 @@ impl IslandConfig {
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::get_config_dir()?;
         Ok(Self {
-            profiles: Self::parse_config(&fs::read_to_string(path.join("main.toml"))?)?,
+            profiles: Self::parse_config(&fs::read_to_string(path.join("main.toml"))?, |path| {
+                path.canonicalize()
+            })?,
             path,
         })
     }
@@ -96,23 +98,28 @@ impl IslandConfig {
         Ok(home_config.join("island"))
     }
 
-    fn parse_config(content: &str) -> Result<Profiles, ConfigError> {
-        let main_config: TomlConfig = toml::from_str(content)?;
-
+    fn parse_config<F>(content: &str, canonicalize_path: F) -> Result<Profiles, ConfigError>
+    where
+        F: Fn(&Path) -> std::io::Result<PathBuf>,
+    {
         let mut profiles = BTreeMap::new();
-        for mut profile in main_config.profiles {
+        for mut profile in toml::from_str::<TomlConfig>(content)?.profiles {
             // Canonicalize the when_beneath path to resolve symlinks and ignore
             // profiles with non-existing directories.
             if let Some(when_beneath) = &profile.when_beneath {
-                if let Ok(canonical_path) = when_beneath.canonicalize() {
-                    profile.when_beneath = Some(canonical_path);
-                    profiles.insert(profile.name.clone(), profile);
-                } else {
-                    eprintln!(
-                        "Warning: ignoring profile \"{}\" because of non-existing directory \"{}\"",
-                        profile.name,
-                        when_beneath.display()
-                    );
+                match canonicalize_path(when_beneath) {
+                    Ok(p) => {
+                        profile.when_beneath = Some(p);
+                        profiles.insert(profile.name.clone(), profile);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: ignoring profile \"{}\" because of error regarding directory \"{}\": {}",
+                            profile.name,
+                            when_beneath.display(),
+                            e
+                        );
+                    }
                 }
             } else {
                 profiles.insert(profile.name.clone(), profile);
@@ -227,6 +234,11 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    // Pure function, independent from the filesystem (i.e. do not check if the path exists).
+    fn nocheck_path(path: &Path) -> std::io::Result<PathBuf> {
+        Ok(path.to_path_buf())
+    }
+
     fn create_test_config() -> IslandConfig {
         let content = r#"
 [[profile]]
@@ -245,14 +257,8 @@ when_beneath = "/home/user/projects/work1"
 name = "standalone"
 "#;
 
-        // Parse TOML directly without canonicalization for tests.
-        let main_config: TomlConfig = toml::from_str(content).unwrap();
-        let mut profiles = BTreeMap::new();
-        for profile in main_config.profiles {
-            profiles.insert(profile.name.clone(), profile);
-        }
         IslandConfig {
-            profiles,
+            profiles: IslandConfig::parse_config(content, nocheck_path).unwrap(),
             path: Default::default(),
         }
     }
