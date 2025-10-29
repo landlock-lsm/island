@@ -3,7 +3,7 @@
 use landlockconfig::{Config, ConfigFormat, ParseDirectoryError, ResolveError, ResolvedConfig};
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -32,7 +32,7 @@ pub struct ProfileError {
     pub kind: ProfileErrorKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ResolvedProfile {
     pub name: String,
     pub config: ResolvedConfig,
@@ -60,14 +60,14 @@ struct TomlConfig {
     profiles: Vec<ProfileEntry>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProfileEntry {
     // TODO: Restrict name.
     pub name: String,
     pub when_beneath: Option<PathBuf>,
 }
 
-type Profiles = BTreeMap<String, ProfileEntry>;
+type Profiles = BTreeMap<String, BTreeSet<ProfileEntry>>;
 
 #[derive(Debug)]
 pub struct IslandConfig {
@@ -110,7 +110,10 @@ impl IslandConfig {
                 match canonicalize_path(when_beneath) {
                     Ok(p) => {
                         profile.when_beneath = Some(p);
-                        profiles.insert(profile.name.clone(), profile);
+                        profiles
+                            .entry(profile.name.clone())
+                            .or_insert_with(BTreeSet::new)
+                            .insert(profile);
                     }
                     Err(e) => {
                         eprintln!(
@@ -122,7 +125,10 @@ impl IslandConfig {
                     }
                 }
             } else {
-                profiles.insert(profile.name.clone(), profile);
+                profiles
+                    .entry(profile.name.clone())
+                    .or_insert_with(BTreeSet::new)
+                    .insert(profile);
             }
         }
         Ok(profiles)
@@ -145,31 +151,28 @@ impl IslandConfig {
         let canonicalized_path = canonicalized_path.as_ref();
 
         // Consistently store sorted paths for scope ordering and determinism.
-        let matching_profiles: BTreeMap<&PathBuf, &ProfileEntry> = self
+        let resolved: Result<Vec<ResolvedProfile>, ConfigError> = self
             .profiles
             .values()
-            .filter_map(|profile| {
-                profile.when_beneath.as_ref().and_then(|when_beneath| {
-                    if canonicalized_path.starts_with(when_beneath) {
-                        Some((when_beneath, profile))
-                    } else {
-                        None
-                    }
+            .flat_map(|profile_set| profile_set.iter())
+            .filter(|profile| {
+                profile
+                    .when_beneath
+                    .as_ref()
+                    .is_some_and(|when_beneath| canonicalized_path.starts_with(when_beneath))
+            })
+            .map(|profile| {
+                Ok(ResolvedProfile {
+                    name: profile.name.clone(),
+                    config: load_config(&profile.name).map_err(|e| e.into())?,
                 })
             })
             .collect();
 
-        if matching_profiles.is_empty() {
+        let resolved = resolved?;
+        if resolved.is_empty() {
             return Err(ConfigError::NoProfileForDirectory {
                 cwd: canonicalized_path.display().to_string(),
-            });
-        }
-
-        let mut resolved = Vec::new();
-        for profile in matching_profiles.into_values() {
-            resolved.push(ResolvedProfile {
-                name: profile.name.clone(),
-                config: load_config(&profile.name).map_err(|e| e.into())?,
             });
         }
 
@@ -201,31 +204,36 @@ impl IslandConfig {
 
     /// Resolve profiles by explicit profile names.
     /// The closure `load_config` is called for each profile name to load its configuration.
-    pub fn resolve_profiles_by_names<F, E>(
+    pub fn resolve_profiles_by_names<I, S, F, E>(
         &self,
-        profile_names: &[String],
+        profile_names: I,
         load_config: F,
     ) -> Result<Vec<ResolvedProfile>, ConfigError>
     where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
         F: Fn(&str) -> Result<ResolvedConfig, E>,
         E: Into<ConfigError>,
     {
-        let mut resolved = Vec::new();
-
-        for profile_name in profile_names {
-            self.profiles
-                .get(profile_name)
-                .ok_or_else(|| ConfigError::ProfileNotFound {
-                    name: profile_name.to_string(),
+        profile_names
+            .into_iter()
+            .try_fold(Vec::new(), |mut resolved, profile_name| {
+                let profile_set = self.profiles.get(profile_name.as_ref()).ok_or_else(|| {
+                    ConfigError::ProfileNotFound {
+                        name: profile_name.as_ref().to_string(),
+                    }
                 })?;
 
-            resolved.push(ResolvedProfile {
-                name: profile_name.to_string(),
-                config: load_config(profile_name).map_err(|e| e.into())?,
-            });
-        }
-
-        Ok(resolved)
+                // Add all profiles with this name (there could be multiple with
+                // different when_beneath).
+                for profile in profile_set {
+                    resolved.push(ResolvedProfile {
+                        name: profile.name.clone(),
+                        config: load_config(&profile.name).map_err(|e| e.into())?,
+                    });
+                }
+                Ok(resolved)
+            })
     }
 }
 
@@ -370,5 +378,90 @@ scoped = ["signal"]
                 ResolvedProfile { name: name2, .. }
             ]) if name == "home" && name2 == "standalone"
         ));
+    }
+
+    #[test]
+    fn test_parse_config_dup_and_sorted() {
+        let content = r#"
+[[profile]]
+name = "b"
+when_beneath = "/foo"
+
+[[profile]]
+name = "b"
+when_beneath = "/foo"
+
+[[profile]]
+name = "a"
+when_beneath = "/foo"
+
+[[profile]]
+name = "b"
+when_beneath = "/bar"
+"#;
+        let config = IslandConfig {
+            profiles: IslandConfig::parse_config(content, nocheck_path).unwrap(),
+            path: Default::default(),
+        };
+
+        let mut profile_iter = config.profiles.iter();
+
+        let profile = profile_iter.next().unwrap();
+        assert_eq!(profile.0, "a");
+
+        // Sorted by name and when_beneath.
+        let mut entry_iter = profile.1.iter();
+        assert_eq!(
+            entry_iter.next(),
+            Some(&ProfileEntry {
+                name: "a".into(),
+                when_beneath: Some("/foo".into()),
+            })
+        );
+        assert_eq!(entry_iter.next(), None);
+
+        let profile = profile_iter.next().unwrap();
+        assert_eq!(profile.0, "b");
+
+        // Sorted by name and when_beneath.
+        let mut entry_iter = profile.1.iter();
+        assert_eq!(
+            entry_iter.next(),
+            Some(&ProfileEntry {
+                name: "b".into(),
+                when_beneath: Some("/bar".into()),
+            })
+        );
+        assert_eq!(
+            entry_iter.next(),
+            Some(&ProfileEntry {
+                name: "b".into(),
+                when_beneath: Some("/foo".into()),
+            })
+        );
+        assert_eq!(entry_iter.next(), None);
+        assert_eq!(profile_iter.next(), None);
+
+        // Check duplicate when_beneath with similar name.
+        let mut profile_iter = config
+            .resolve_profiles_by_path("/foo", |_| -> Result<ResolvedConfig, ConfigError> {
+                Ok(create_mock_resolved_config())
+            })
+            .unwrap()
+            .into_iter();
+        assert_eq!(profile_iter.next().unwrap().name, "a");
+        assert_eq!(profile_iter.next().unwrap().name, "b");
+        assert_eq!(profile_iter.next(), None);
+
+        // Check duplicate name with different when_beneath.
+        let mut profile_iter = config
+            .resolve_profiles_by_names(["b"], |_| -> Result<ResolvedConfig, ConfigError> {
+                Ok(create_mock_resolved_config())
+            })
+            .unwrap()
+            .into_iter();
+        assert_eq!(profile_iter.next().unwrap().name, "b"); // /bar
+        assert_eq!(profile_iter.next().unwrap().name, "b"); // /foo
+        assert_eq!(profile_iter.next(), None);
     }
 }
