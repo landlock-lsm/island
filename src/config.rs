@@ -33,8 +33,8 @@ pub struct ProfileError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct ResolvedProfile {
-    pub name: String,
+pub struct ResolvedProfile<'a> {
+    pub entry: &'a ProfileEntry,
     pub config: ResolvedConfig,
 }
 
@@ -142,7 +142,7 @@ impl IslandConfig {
         &self,
         canonicalized_path: P,
         load_config: F,
-    ) -> Result<Vec<ResolvedProfile>, ConfigError>
+    ) -> Result<Vec<ResolvedProfile<'_>>, ConfigError>
     where
         P: AsRef<Path>,
         F: Fn(&str) -> Result<ResolvedConfig, E>,
@@ -163,7 +163,7 @@ impl IslandConfig {
             })
             .map(|profile| {
                 Ok(ResolvedProfile {
-                    name: profile.name.clone(),
+                    entry: profile,
                     config: load_config(&profile.name).map_err(|e| e.into())?,
                 })
             })
@@ -208,7 +208,7 @@ impl IslandConfig {
         &self,
         profile_names: I,
         load_config: F,
-    ) -> Result<Vec<ResolvedProfile>, ConfigError>
+    ) -> Result<Vec<ResolvedProfile<'_>>, ConfigError>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -228,7 +228,7 @@ impl IslandConfig {
                 // different when_beneath).
                 for profile in profile_set {
                     resolved.push(ResolvedProfile {
-                        name: profile.name.clone(),
+                        entry: profile,
                         config: load_config(&profile.name).map_err(|e| e.into())?,
                     });
                 }
@@ -311,9 +311,9 @@ scoped = ["signal"]
         assert!(matches!(
             result.as_deref(),
             Ok([
-                ResolvedProfile { name, .. },
-                ResolvedProfile { name: name2, .. }
-            ]) if name == "home" && name2 == "projects"
+                ResolvedProfile { entry, .. },
+                ResolvedProfile { entry: entry2, .. }
+            ]) if entry.name == "home" && entry2.name == "projects"
         ));
     }
 
@@ -362,7 +362,7 @@ scoped = ["signal"]
 
         assert!(matches!(
             result.as_deref(),
-            Ok([ResolvedProfile { name, .. }]) if name == "standalone"
+            Ok([ResolvedProfile { entry, .. }]) if entry.name == "standalone"
         ));
 
         // Test resolving mixed profiles (with and without when_beneath).
@@ -374,9 +374,9 @@ scoped = ["signal"]
         assert!(matches!(
             result.as_deref(),
             Ok([
-                ResolvedProfile { name, .. },
-                ResolvedProfile { name: name2, .. }
-            ]) if name == "home" && name2 == "standalone"
+                ResolvedProfile { entry, .. },
+                ResolvedProfile { entry: entry2, .. }
+            ]) if entry.name == "home" && entry2.name == "standalone"
         ));
     }
 
@@ -449,8 +449,20 @@ when_beneath = "/bar"
             })
             .unwrap()
             .into_iter();
-        assert_eq!(profile_iter.next().unwrap().name, "a");
-        assert_eq!(profile_iter.next().unwrap().name, "b");
+        assert_eq!(
+            profile_iter.next().unwrap().entry,
+            &ProfileEntry {
+                name: "a".into(),
+                when_beneath: Some("/foo".into()),
+            }
+        );
+        assert_eq!(
+            profile_iter.next().unwrap().entry,
+            &ProfileEntry {
+                name: "b".into(),
+                when_beneath: Some("/foo".into()),
+            }
+        );
         assert_eq!(profile_iter.next(), None);
 
         // Check duplicate name with different when_beneath.
@@ -460,8 +472,20 @@ when_beneath = "/bar"
             })
             .unwrap()
             .into_iter();
-        assert_eq!(profile_iter.next().unwrap().name, "b"); // /bar
-        assert_eq!(profile_iter.next().unwrap().name, "b"); // /foo
+        assert_eq!(
+            profile_iter.next().unwrap().entry,
+            &ProfileEntry {
+                name: "b".into(),
+                when_beneath: Some("/bar".into()),
+            }
+        );
+        assert_eq!(
+            profile_iter.next().unwrap().entry,
+            &ProfileEntry {
+                name: "b".into(),
+                when_beneath: Some("/foo".into()),
+            }
+        );
         assert_eq!(profile_iter.next(), None);
     }
 }

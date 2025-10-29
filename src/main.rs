@@ -100,7 +100,7 @@ enum IslandError {
 }
 
 fn run(
-    resolved_profiles: Vec<ResolvedProfile>,
+    resolved_profiles: Vec<ResolvedProfile<'_>>,
     command_args: &[String],
     verbose: &Verbose,
 ) -> Result<(), IslandError> {
@@ -110,7 +110,7 @@ fn run(
             resolved_profiles.len(),
             resolved_profiles
                 .iter()
-                .map(|p| p.name.to_string())
+                .map(|p| p.entry.name.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         )
