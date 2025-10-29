@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use crate::context::{ContextEntry, ContextSet};
 use landlockconfig::{Config, ConfigFormat, ParseDirectoryError, ResolveError, ResolvedConfig};
 use serde::Deserialize;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -60,14 +61,7 @@ struct TomlConfig {
     contexts: Vec<ContextEntry>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ContextEntry {
-    // TODO: Restrict profile's name.
-    pub profile: String,
-    pub when_beneath: Option<PathBuf>,
-}
-
-type Contexts = BTreeMap<String, BTreeSet<ContextEntry>>;
+type Contexts = BTreeMap<String, ContextSet>;
 
 #[derive(Debug)]
 pub struct IslandConfig {
@@ -121,10 +115,15 @@ impl IslandConfig {
                     }
                 }
             }
-            contexts
+
+            let result = contexts
                 .entry(context.profile.clone())
-                .or_insert_with(BTreeSet::new)
+                .or_insert_with(ContextSet::default)
                 .insert(context);
+
+            if let Some(message) = result.warning() {
+                eprintln!("Warning: {}", message);
+            }
         }
 
         Ok(contexts)
@@ -394,6 +393,9 @@ when_beneath = "/foo"
 [[context]]
 profile = "b"
 when_beneath = "/bar"
+
+[[context]]
+profile = "a"
 "#;
         let config = IslandConfig {
             contexts: IslandConfig::parse_config(content, nocheck_path).unwrap(),

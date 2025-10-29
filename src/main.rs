@@ -9,6 +9,8 @@ use thiserror::Error;
 mod config;
 use config::{ConfigError, IslandConfig, ResolvedProfile};
 
+mod context;
+
 struct Verbose(bool);
 
 impl Verbose {
