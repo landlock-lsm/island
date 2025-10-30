@@ -110,7 +110,7 @@ fn run(
             resolved_profiles.len(),
             resolved_profiles
                 .iter()
-                .map(|p| p.entry.name.to_string())
+                .map(|p| p.entry.profile.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -126,7 +126,7 @@ fn run(
         ruleset.restrict_self()?;
     }
 
-    // TODO: Apply environment variable modifications from profile
+    // TODO: Apply environment variable modifications from context
     // TODO: Parse and apply --env arguments
 
     // Clap ensures command_args contains at least one element due to num_args = 1..
@@ -155,11 +155,11 @@ fn main() -> Result<(), IslandError> {
             };
 
             let resolved_profiles = if !profile.is_empty() {
-                // Use explicit profiles - no CWD inference.
+                // Use explicit profiles, without context inference.
                 verbose.print(|| format!("Using explicit profiles: {:?}", profile));
                 island_config.resolve_profiles_by_names(&profile, load_config)?
             } else {
-                // Use automatic profile resolution based on CWD.
+                // Use automatic profile resolution based on context.
                 let canonicalized_cwd = std::env::current_dir()?.canonicalize()?;
                 island_config.resolve_profiles_by_path(canonicalized_cwd, load_config)?
             };

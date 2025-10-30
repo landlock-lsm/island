@@ -34,7 +34,7 @@ pub struct ProfileError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ResolvedProfile<'a> {
-    pub entry: &'a ProfileEntry,
+    pub entry: &'a ContextEntry,
     pub config: ResolvedConfig,
 }
 
@@ -44,8 +44,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     TomlParse(#[from] toml::de::Error),
-    #[error("no profile found for current directory: {cwd}")]
-    NoProfileForDirectory { cwd: String },
+    #[error("no context found for current directory: {cwd}")]
+    NoContextForDirectory { cwd: String },
     #[error("profile \"{name}\" not found in configuration")]
     ProfileNotFound { name: String },
     #[error("Unable to find the home configuration directory: empty $XDG_CONFIG_HOME and $HOME")]
@@ -56,22 +56,22 @@ pub enum ConfigError {
 
 #[derive(Debug, Deserialize)]
 struct TomlConfig {
-    #[serde(rename = "profile")]
-    profiles: Vec<ProfileEntry>,
+    #[serde(rename = "context")]
+    contexts: Vec<ContextEntry>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ProfileEntry {
-    // TODO: Restrict name.
-    pub name: String,
+pub struct ContextEntry {
+    // TODO: Restrict profile's name.
+    pub profile: String,
     pub when_beneath: Option<PathBuf>,
 }
 
-type Profiles = BTreeMap<String, BTreeSet<ProfileEntry>>;
+type Contexts = BTreeMap<String, BTreeSet<ContextEntry>>;
 
 #[derive(Debug)]
 pub struct IslandConfig {
-    profiles: Profiles,
+    contexts: Contexts,
     path: PathBuf,
 }
 
@@ -80,7 +80,7 @@ impl IslandConfig {
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::get_config_dir()?;
         Ok(Self {
-            profiles: Self::parse_config(&fs::read_to_string(path.join("main.toml"))?, |path| {
+            contexts: Self::parse_config(&fs::read_to_string(path.join("main.toml"))?, |path| {
                 path.canonicalize()
             })?,
             path,
@@ -98,46 +98,42 @@ impl IslandConfig {
         Ok(home_config.join("island"))
     }
 
-    fn parse_config<F>(content: &str, canonicalize_path: F) -> Result<Profiles, ConfigError>
+    fn parse_config<F>(content: &str, canonicalize_path: F) -> Result<Contexts, ConfigError>
     where
         F: Fn(&Path) -> std::io::Result<PathBuf>,
     {
-        let mut profiles = BTreeMap::new();
-        for mut profile in toml::from_str::<TomlConfig>(content)?.profiles {
+        let mut contexts = BTreeMap::new();
+
+        for mut context in toml::from_str::<TomlConfig>(content)?.contexts {
             // Canonicalize the when_beneath path to resolve symlinks and ignore
-            // profiles with non-existing directories.
-            if let Some(when_beneath) = &profile.when_beneath {
+            // contexts with non-existing directories.
+            if let Some(when_beneath) = &context.when_beneath {
                 match canonicalize_path(when_beneath) {
-                    Ok(p) => {
-                        profile.when_beneath = Some(p);
-                        profiles
-                            .entry(profile.name.clone())
-                            .or_insert_with(BTreeSet::new)
-                            .insert(profile);
-                    }
+                    Ok(p) => context.when_beneath = Some(p),
                     Err(e) => {
                         eprintln!(
-                            "Warning: ignoring profile \"{}\" because of error regarding directory \"{}\": {}",
-                            profile.name,
+                            "Warning: ignoring context's profile \"{}\" because of error regarding directory \"{}\": {}",
+                            context.profile,
                             when_beneath.display(),
                             e
                         );
+                        continue;
                     }
                 }
-            } else {
-                profiles
-                    .entry(profile.name.clone())
-                    .or_insert_with(BTreeSet::new)
-                    .insert(profile);
             }
+            contexts
+                .entry(context.profile.clone())
+                .or_insert_with(BTreeSet::new)
+                .insert(context);
         }
-        Ok(profiles)
+
+        Ok(contexts)
     }
 
-    /// Resolve all profiles that match the provided path in hierarchical order.
+    /// Resolve all contexts that match the provided path in hierarchical order.
     /// `canonicalized_path` should already have been canonicalized with `canonicalize()`.
-    /// The closure `load_config` is called for each matching profile to load its configuration.
-    /// Returns resolved profiles sorted from broadest scope to most specific scope.
+    /// The closure `load_config` is called for each matching context to load its configuration.
+    /// Returns resolved contexts sorted from broadest scope to most specific scope.
     pub fn resolve_profiles_by_path<P, F, E>(
         &self,
         canonicalized_path: P,
@@ -152,26 +148,26 @@ impl IslandConfig {
 
         // Consistently store sorted paths for scope ordering and determinism.
         let resolved: Result<Vec<ResolvedProfile>, ConfigError> = self
-            .profiles
+            .contexts
             .values()
-            .flat_map(|profile_set| profile_set.iter())
-            .filter(|profile| {
-                profile
+            .flat_map(|contexts| contexts.iter())
+            .filter(|context| {
+                context
                     .when_beneath
                     .as_ref()
                     .is_some_and(|when_beneath| canonicalized_path.starts_with(when_beneath))
             })
-            .map(|profile| {
+            .map(|context| {
                 Ok(ResolvedProfile {
-                    entry: profile,
-                    config: load_config(&profile.name).map_err(|e| e.into())?,
+                    entry: context,
+                    config: load_config(&context.profile).map_err(|e| e.into())?,
                 })
             })
             .collect();
 
         let resolved = resolved?;
         if resolved.is_empty() {
-            return Err(ConfigError::NoProfileForDirectory {
+            return Err(ConfigError::NoContextForDirectory {
                 cwd: canonicalized_path.display().to_string(),
             });
         }
@@ -218,7 +214,7 @@ impl IslandConfig {
         profile_names
             .into_iter()
             .try_fold(Vec::new(), |mut resolved, profile_name| {
-                let profile_set = self.profiles.get(profile_name.as_ref()).ok_or_else(|| {
+                let contexts = self.contexts.get(profile_name.as_ref()).ok_or_else(|| {
                     ConfigError::ProfileNotFound {
                         name: profile_name.as_ref().to_string(),
                     }
@@ -226,10 +222,10 @@ impl IslandConfig {
 
                 // Add all profiles with this name (there could be multiple with
                 // different when_beneath).
-                for profile in profile_set {
+                for context in contexts {
                     resolved.push(ResolvedProfile {
-                        entry: profile,
-                        config: load_config(&profile.name).map_err(|e| e.into())?,
+                        entry: context,
+                        config: load_config(&context.profile).map_err(|e| e.into())?,
                     });
                 }
                 Ok(resolved)
@@ -249,24 +245,24 @@ mod tests {
 
     fn create_test_config() -> IslandConfig {
         let content = r#"
-[[profile]]
-name = "home"
+[[context]]
+profile = "home"
 when_beneath = "/home/user"
 
-[[profile]]
-name = "projects"
+[[context]]
+profile = "projects"
 when_beneath = "/home/user/projects"
 
-[[profile]]
-name = "work1"
+[[context]]
+profile = "work1"
 when_beneath = "/home/user/projects/work1"
 
-[[profile]]
-name = "standalone"
+[[context]]
+profile = "standalone"
 "#;
 
         IslandConfig {
-            profiles: IslandConfig::parse_config(content, nocheck_path).unwrap(),
+            contexts: IslandConfig::parse_config(content, nocheck_path).unwrap(),
             path: Default::default(),
         }
     }
@@ -313,7 +309,7 @@ scoped = ["signal"]
             Ok([
                 ResolvedProfile { entry, .. },
                 ResolvedProfile { entry: entry2, .. }
-            ]) if entry.name == "home" && entry2.name == "projects"
+            ]) if entry.profile == "home" && entry2.profile == "projects"
         ));
     }
 
@@ -346,7 +342,7 @@ scoped = ["signal"]
         );
 
         assert!(
-            matches!(result, Err(ConfigError::NoProfileForDirectory { cwd }) if cwd == "/home/bob/projects")
+            matches!(result, Err(ConfigError::NoContextForDirectory { cwd }) if cwd == "/home/bob/projects")
         );
     }
 
@@ -362,7 +358,7 @@ scoped = ["signal"]
 
         assert!(matches!(
             result.as_deref(),
-            Ok([ResolvedProfile { entry, .. }]) if entry.name == "standalone"
+            Ok([ResolvedProfile { entry, .. }]) if entry.profile == "standalone"
         ));
 
         // Test resolving mixed profiles (with and without when_beneath).
@@ -376,116 +372,116 @@ scoped = ["signal"]
             Ok([
                 ResolvedProfile { entry, .. },
                 ResolvedProfile { entry: entry2, .. }
-            ]) if entry.name == "home" && entry2.name == "standalone"
+            ]) if entry.profile == "home" && entry2.profile == "standalone"
         ));
     }
 
     #[test]
     fn test_parse_config_dup_and_sorted() {
         let content = r#"
-[[profile]]
-name = "b"
+[[context]]
+profile = "b"
 when_beneath = "/foo"
 
-[[profile]]
-name = "b"
+[[context]]
+profile = "b"
 when_beneath = "/foo"
 
-[[profile]]
-name = "a"
+[[context]]
+profile = "a"
 when_beneath = "/foo"
 
-[[profile]]
-name = "b"
+[[context]]
+profile = "b"
 when_beneath = "/bar"
 "#;
         let config = IslandConfig {
-            profiles: IslandConfig::parse_config(content, nocheck_path).unwrap(),
+            contexts: IslandConfig::parse_config(content, nocheck_path).unwrap(),
             path: Default::default(),
         };
 
-        let mut profile_iter = config.profiles.iter();
+        let mut context_iter = config.contexts.iter();
 
-        let profile = profile_iter.next().unwrap();
-        assert_eq!(profile.0, "a");
+        let context = context_iter.next().unwrap();
+        assert_eq!(context.0, "a");
 
-        // Sorted by name and when_beneath.
-        let mut entry_iter = profile.1.iter();
+        // Sorted by profile's name and when_beneath.
+        let mut entry_iter = context.1.iter();
         assert_eq!(
             entry_iter.next(),
-            Some(&ProfileEntry {
-                name: "a".into(),
+            Some(&ContextEntry {
+                profile: "a".into(),
                 when_beneath: Some("/foo".into()),
             })
         );
         assert_eq!(entry_iter.next(), None);
 
-        let profile = profile_iter.next().unwrap();
-        assert_eq!(profile.0, "b");
+        let context = context_iter.next().unwrap();
+        assert_eq!(context.0, "b");
 
-        // Sorted by name and when_beneath.
-        let mut entry_iter = profile.1.iter();
+        // Sorted by profile's name and when_beneath.
+        let mut entry_iter = context.1.iter();
         assert_eq!(
             entry_iter.next(),
-            Some(&ProfileEntry {
-                name: "b".into(),
+            Some(&ContextEntry {
+                profile: "b".into(),
                 when_beneath: Some("/bar".into()),
             })
         );
         assert_eq!(
             entry_iter.next(),
-            Some(&ProfileEntry {
-                name: "b".into(),
+            Some(&ContextEntry {
+                profile: "b".into(),
                 when_beneath: Some("/foo".into()),
             })
         );
         assert_eq!(entry_iter.next(), None);
-        assert_eq!(profile_iter.next(), None);
+        assert_eq!(context_iter.next(), None);
 
-        // Check duplicate when_beneath with similar name.
-        let mut profile_iter = config
+        // Check duplicate when_beneath with similar profile's name.
+        let mut context_iter = config
             .resolve_profiles_by_path("/foo", |_| -> Result<ResolvedConfig, ConfigError> {
                 Ok(create_mock_resolved_config())
             })
             .unwrap()
             .into_iter();
         assert_eq!(
-            profile_iter.next().unwrap().entry,
-            &ProfileEntry {
-                name: "a".into(),
+            context_iter.next().unwrap().entry,
+            &ContextEntry {
+                profile: "a".into(),
                 when_beneath: Some("/foo".into()),
             }
         );
         assert_eq!(
-            profile_iter.next().unwrap().entry,
-            &ProfileEntry {
-                name: "b".into(),
+            context_iter.next().unwrap().entry,
+            &ContextEntry {
+                profile: "b".into(),
                 when_beneath: Some("/foo".into()),
             }
         );
-        assert_eq!(profile_iter.next(), None);
+        assert_eq!(context_iter.next(), None);
 
-        // Check duplicate name with different when_beneath.
-        let mut profile_iter = config
+        // Check duplicate profile's name with different when_beneath.
+        let mut context_iter = config
             .resolve_profiles_by_names(["b"], |_| -> Result<ResolvedConfig, ConfigError> {
                 Ok(create_mock_resolved_config())
             })
             .unwrap()
             .into_iter();
         assert_eq!(
-            profile_iter.next().unwrap().entry,
-            &ProfileEntry {
-                name: "b".into(),
+            context_iter.next().unwrap().entry,
+            &ContextEntry {
+                profile: "b".into(),
                 when_beneath: Some("/bar".into()),
             }
         );
         assert_eq!(
-            profile_iter.next().unwrap().entry,
-            &ProfileEntry {
-                name: "b".into(),
+            context_iter.next().unwrap().entry,
+            &ContextEntry {
+                profile: "b".into(),
                 when_beneath: Some("/foo".into()),
             }
         );
-        assert_eq!(profile_iter.next(), None);
+        assert_eq!(context_iter.next(), None);
     }
 }
