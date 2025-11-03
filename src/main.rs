@@ -112,7 +112,7 @@ fn run(
             resolved_profiles.len(),
             resolved_profiles
                 .iter()
-                .map(|p| p.entry.profile.to_string())
+                .map(|p| p.name.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -149,7 +149,7 @@ fn main() -> Result<(), IslandError> {
 
     match cli.command {
         Commands::Run { profile, command } => {
-            let island_config = IslandConfig::load()?;
+            let island_config = IslandConfig::new()?;
             let load_config = |name: &str| -> Result<ResolvedConfig, ConfigError> {
                 island_config
                     .load_landlock_config(name)
