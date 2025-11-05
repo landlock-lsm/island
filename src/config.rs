@@ -62,10 +62,11 @@ pub enum ConfigError {
     Profile(#[from] ProfileError),
 }
 
+// Handle empty profile files.  This is useful to validate a profile without context.
 #[derive(Debug, Deserialize)]
 struct ProfileConfig {
     #[serde(rename = "context")]
-    contexts: Vec<TomlContextEntry>,
+    contexts: Option<Vec<TomlContextEntry>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,11 +74,16 @@ struct TomlContextEntry {
     pub when_beneath: PathBuf,
 }
 
-type Contexts = BTreeMap<String, ContextSet>;
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub contexts: ContextSet,
+}
+
+type Profiles = BTreeMap<String, Profile>;
 
 #[derive(Debug)]
 pub struct IslandConfig {
-    contexts: Contexts,
+    profiles: Profiles,
     profiles_dir: PathBuf,
 }
 
@@ -97,7 +103,7 @@ impl IslandConfig {
                 source,
             })?;
 
-        let mut contexts = BTreeMap::new();
+        let mut profiles = Profiles::default();
         for entry in profiles_entries {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
@@ -105,29 +111,23 @@ impl IslandConfig {
                 let island_toml_path = entry.path().join("profile.toml");
 
                 if island_toml_path.exists() {
-                    let content = fs::read_to_string(&island_toml_path)?;
-                    let parsed_contexts =
-                        Self::parse_profile_config(&content, &profile_name, |path| {
-                            path.canonicalize()
-                        })?;
+                    let profile = Self::parse_profile_config(
+                        &fs::read_to_string(&island_toml_path)?,
+                        &profile_name,
+                        |path| path.canonicalize(),
+                    )?;
 
-                    let target_set = contexts
-                        .entry(profile_name.clone())
-                        .or_insert_with(ContextSet::default);
-                    for context in parsed_contexts.into_iter() {
-                        if let Some(message) = target_set.insert(context).warning(&profile_name) {
-                            // This should never happen because this was already checked when creating
-                            // the profile's context, and profile's name should be unique, but race
-                            // conditions are still possible when reading the content of a directory.
-                            eprintln!("Warning: {}", message);
-                        }
-                    }
+                    // Ignore potential race conditions when listing the content
+                    // of a directory and it returns the same entry several
+                    // times. In this case, just ignore the previous similar
+                    // one(s).
+                    profiles.insert(profile_name, profile);
                 }
             }
         }
 
         Ok(Self {
-            contexts,
+            profiles,
             profiles_dir,
         })
     }
@@ -147,22 +147,17 @@ impl IslandConfig {
         content: &str,
         profile_name: &str,
         canonicalize_path: F,
-    ) -> Result<ContextSet, ConfigError>
+    ) -> Result<Profile, ConfigError>
     where
         F: Fn(&Path) -> std::io::Result<PathBuf>,
     {
-        let mut context_set = ContextSet::default();
+        let mut profile = Profile::default();
+        let cfg = toml::from_str::<ProfileConfig>(content)?;
 
-        // Handle empty profile files.  This is useful to validate a profile without context.
-        // TODO: Make this part of the TomlContextEntry parser.
-        if content.trim().is_empty() {
-            return Ok(context_set);
-        }
-
-        for toml_context in toml::from_str::<ProfileConfig>(content)?.contexts {
+        for cfg_context in cfg.contexts.unwrap_or_default() {
             // Canonicalize the when_beneath path to resolve symlinks and ignore
             // contexts with non-existing directories.
-            let context = match canonicalize_path(&toml_context.when_beneath) {
+            let context = match canonicalize_path(&cfg_context.when_beneath) {
                 Ok(p) => ContextEntry {
                     when_beneath: Some(p),
                 },
@@ -170,20 +165,19 @@ impl IslandConfig {
                     eprintln!(
                             "Warning: ignoring context for profile \"{}\" because of error regarding directory \"{}\": {}",
                             profile_name,
-                            toml_context.when_beneath.display(),
+                            cfg_context.when_beneath.display(),
                             e
                         );
                     continue;
                 }
             };
 
-            if let Some(message) = context_set.insert(context).warning(profile_name) {
+            if let Some(message) = profile.contexts.insert(context).warning(profile_name) {
                 eprintln!("Warning: {}", message);
             }
         }
 
-        // Handle empty profile files as well.
-        Ok(context_set)
+        Ok(profile)
     }
 
     /// Resolves all contexts that match the provided path in hierarchical order.
@@ -206,11 +200,12 @@ impl IslandConfig {
 
         // Consistently store sorted paths for scope ordering and determinism.
         let resolved: Result<Vec<_>, ConfigError> = self
-            .contexts
+            .profiles
             .iter()
-            .filter_map(|(profile_name, contexts)| {
+            .filter_map(|(profile_name, profile)| {
                 // Find the first matching context
-                contexts
+                profile
+                    .contexts
                     .iter()
                     .find(|context| {
                         matches!(
@@ -274,7 +269,7 @@ impl IslandConfig {
             .map(|profile_name| {
                 // Get the actual key from contexts to ensure lifetime.
                 let profile_key = self
-                    .contexts
+                    .profiles
                     .get_key_value(profile_name.as_ref())
                     .ok_or_else(|| ConfigError::ProfileNotFound {
                         name: profile_name.as_ref().to_string(),
@@ -297,14 +292,14 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    fn create_test_profiles<I>(profiles_data: I) -> BTreeMap<String, ContextSet>
+    fn create_test_profiles<I>(profiles_data: I) -> Profiles
     where
         I: IntoIterator<Item = (&'static str, &'static str)>,
     {
-        let mut contexts = BTreeMap::new();
+        let mut profiles = Profiles::default();
 
         for (profile_name, toml_content) in profiles_data {
-            let parsed_context_set = IslandConfig::parse_profile_config(
+            let profile = IslandConfig::parse_profile_config(
                 toml_content,
                 profile_name,
                 // Pure function, independent from the filesystem (i.e. do not check if the path exists).
@@ -314,15 +309,13 @@ mod tests {
 
             // Ensure profile names are unique - insert should return None (no previous value)
             assert!(
-                contexts
-                    .insert(profile_name.to_string(), parsed_context_set)
-                    .is_none(),
+                profiles.insert(profile_name.to_string(), profile).is_none(),
                 "Duplicate profile name in test data: {}",
                 profile_name
             );
         }
 
-        contexts
+        profiles
     }
 
     fn create_test_config() -> IslandConfig {
@@ -352,9 +345,14 @@ when_beneath = "/home/user/projects/work1"
         ];
 
         IslandConfig {
-            contexts: create_test_profiles(profiles_data),
+            profiles: create_test_profiles(profiles_data),
             profiles_dir: Default::default(),
         }
+    }
+
+    #[test]
+    fn test_empty_profile() {
+        create_test_profiles([("empty", "")]);
     }
 
     #[test]
@@ -497,17 +495,17 @@ when_beneath = "/foo"
         ];
 
         let config = IslandConfig {
-            contexts: create_test_profiles(profiles_data),
+            profiles: create_test_profiles(profiles_data),
             profiles_dir: Default::default(),
         };
 
-        let mut context_iter = config.contexts.iter();
+        let mut profile_iter = config.profiles.iter();
 
-        let context = context_iter.next().unwrap();
-        assert_eq!(context.0, "a");
+        let profile = profile_iter.next().unwrap();
+        assert_eq!(profile.0, "a");
 
         // Sorted by profile's name and when_beneath.
-        let mut entry_iter = context.1.iter();
+        let mut entry_iter = profile.1.contexts.iter();
         assert_eq!(
             entry_iter.next(),
             Some(&ContextEntry {
@@ -516,11 +514,11 @@ when_beneath = "/foo"
         );
         assert_eq!(entry_iter.next(), None);
 
-        let context = context_iter.next().unwrap();
-        assert_eq!(context.0, "b");
+        let profile = profile_iter.next().unwrap();
+        assert_eq!(profile.0, "b");
 
         // Sorted by profile's name and when_beneath.
-        let mut entry_iter = context.1.iter();
+        let mut entry_iter = profile.1.contexts.iter();
         assert_eq!(
             entry_iter.next(),
             Some(&ContextEntry {
@@ -534,17 +532,17 @@ when_beneath = "/foo"
             })
         );
         assert_eq!(entry_iter.next(), None);
-        assert_eq!(context_iter.next(), None);
+        assert_eq!(profile_iter.next(), None);
 
         // Check duplicate when_beneath with similar profile's name.
-        let mut context_iter = config
+        let mut profile_iter = config
             .resolve_profiles_by_path("/foo", |_| -> Result<ResolvedConfig, ConfigError> {
                 Ok(create_mock_resolved_config())
             })
             .unwrap()
             .into_iter();
         assert!(matches!(
-            context_iter.next().unwrap(),
+            profile_iter.next().unwrap(),
             ResolvedProfile {
                 name: "a",
                 context: Some(&ContextEntry {
@@ -554,7 +552,7 @@ when_beneath = "/foo"
             } if path == &PathBuf::from("/foo")
         ));
         assert!(matches!(
-            context_iter.next().unwrap(),
+            profile_iter.next().unwrap(),
             ResolvedProfile {
                 name: "b",
                 context: Some(&ContextEntry {
@@ -563,23 +561,23 @@ when_beneath = "/foo"
                 ..
             } if path == &PathBuf::from("/foo")
         ));
-        assert_eq!(context_iter.next(), None);
+        assert_eq!(profile_iter.next(), None);
 
         // Check duplicate profile's name with different when_beneath.
-        let mut context_iter = config
+        let mut profile_iter = config
             .resolve_profiles_by_names(&["b"], |_| -> Result<ResolvedConfig, ConfigError> {
                 Ok(create_mock_resolved_config())
             })
             .unwrap()
             .into_iter();
         assert!(matches!(
-            context_iter.next().unwrap(),
+            profile_iter.next().unwrap(),
             ResolvedProfile {
                 name: "b",
                 context: None,
                 ..
             }
         ));
-        assert_eq!(context_iter.next(), None);
+        assert_eq!(profile_iter.next(), None);
     }
 }
