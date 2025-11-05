@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 use landlock::RulesetError;
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
-use std::{fmt::Display, os::unix::process::CommandExt, process::Command};
+use std::{collections::BTreeMap, fmt::Display, os::unix::process::CommandExt, process::Command};
 use thiserror::Error;
 
 mod config;
@@ -118,6 +118,8 @@ fn run(
         )
     });
 
+    let mut env_vars = BTreeMap::default();
+
     // Apply each profile's restrictions in order (broadest scope first).
     for resolved_profile in resolved_profiles {
         let (ruleset, rule_errors) = resolved_profile.config.build_ruleset()?;
@@ -126,9 +128,19 @@ fn run(
         }
         // TODO: Do not rely on the kernel to enforce nested sandboxing (limited to 16 layers).
         ruleset.restrict_self()?;
-    }
 
-    // TODO: Apply environment variable modifications from context
+        // Set environment variables defined by profile.  When using context
+        // inference (e.g. resolve_profiles_by_path), the environment variables
+        // are set from the broadest context to the most fitting one to favor
+        // the most precise profile, potentially overriding previous ones.  This
+        // is not the case when using explicit profiles (e.g.
+        // resolve_profiles_by_names), where the environment variables are set
+        // in the order of the provided profile names.
+        for env in resolved_profile.env_vars {
+            verbose.print(|| format!("Setting {}={}", env.name, env.literal));
+            env_vars.insert(&env.name, &env.literal);
+        }
+    }
     // TODO: Parse and apply --env arguments
 
     // Clap ensures command_args contains at least one element due to num_args = 1..
@@ -139,6 +151,7 @@ fn run(
         // TODO: Add a TTY proxy.
         Command::new(&command_args[0])
             .args(&command_args[1..])
+            .envs(&env_vars)
             .exec(),
     ))
 }

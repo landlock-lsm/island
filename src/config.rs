@@ -33,11 +33,18 @@ pub struct ProfileError {
     pub kind: ProfileErrorKind,
 }
 
+#[derive(Debug, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Env {
+    pub name: String,
+    pub literal: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ResolvedProfile<'a> {
     pub name: &'a str,
     pub context: Option<&'a ContextEntry>,
     pub config: ResolvedConfig,
+    pub env_vars: &'a BTreeSet<Env>,
 }
 
 /// The greatest has the more tailored context, otherwise fall back to
@@ -86,6 +93,7 @@ pub enum ConfigError {
 struct ProfileConfig {
     #[serde(rename = "context")]
     contexts: Option<Vec<TomlContextEntry>>,
+    env: Option<Vec<Env>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +104,7 @@ struct TomlContextEntry {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Profile {
     pub contexts: ContextSet,
+    pub env_vars: BTreeSet<Env>,
 }
 
 type Profiles = BTreeMap<String, Profile>;
@@ -197,6 +206,8 @@ impl IslandConfig {
             }
         }
 
+        profile.env_vars.extend(cfg.env.unwrap_or_default());
+
         Ok(profile)
     }
 
@@ -238,6 +249,7 @@ impl IslandConfig {
                             name: profile_name,
                             context: Some(context),
                             config: load_config(profile_name).map_err(|e| e.into())?,
+                            env_vars: &profile.env_vars,
                         })
                     })
             })
@@ -288,19 +300,19 @@ impl IslandConfig {
             .iter()
             .map(|profile_name| {
                 // Get the actual key from contexts to ensure lifetime.
-                let profile_key = self
+                let (profile_key, profile) = self
                     .profiles
                     .get_key_value(profile_name.as_ref())
                     .ok_or_else(|| ConfigError::ProfileNotFound {
                         name: profile_name.as_ref().to_string(),
-                    })?
-                    .0;
+                    })?;
 
                 Ok(ResolvedProfile {
                     name: profile_key,
                     // Context is always None since we resolved by name.
                     context: None,
                     config: load_config(profile_key).map_err(|e| e.into())?,
+                    env_vars: &profile.env_vars,
                 })
             })
             .collect()
@@ -615,10 +627,13 @@ when_beneath = "/foo"
         name: &'a str,
         context: Option<&'a ContextEntry>,
     ) -> ResolvedProfile<'a> {
+        static EMPTY_BTREE_SET: BTreeSet<Env> = BTreeSet::new();
+
         ResolvedProfile {
             name,
             context,
             config: create_mock_resolved_config(),
+            env_vars: &EMPTY_BTREE_SET,
         }
     }
 
@@ -852,6 +867,70 @@ when_beneath = "/foo/bar"
                 } if name == n
             ));
         }
+        assert_eq!(profile_iter.next(), None);
+    }
+
+    #[test]
+    fn test_parse_config_env() {
+        let profiles_data = [
+            (
+                "with context",
+                r#"
+[[context]]
+when_beneath = "/foo"
+
+[[env]]
+name = "FOO"
+literal = "/tmp/foo"
+
+[[env]]
+name = "BAR"
+literal = "/tmp/bar"
+"#,
+            ),
+            (
+                "without context",
+                r#"
+[[env]]
+name = "BAR"
+literal = "/tmp/bar2"
+"#,
+            ),
+        ];
+
+        let config = create_test_config_with_profiles(profiles_data);
+        let resolved_profiles = config
+            .resolve_profiles_by_path("/foo/bar", |_| -> Result<ResolvedConfig, ConfigError> {
+                Ok(create_mock_resolved_config())
+            })
+            .unwrap();
+        let mut profile_iter = resolved_profiles.iter();
+
+        let profile = profile_iter.next().unwrap();
+        assert!(matches!(
+            profile,
+            ResolvedProfile {
+            name: "with context",
+            context: Some(&ContextEntry {
+                when_beneath: Some(ref path),
+            }),
+            ..
+            } if path == &PathBuf::from("/foo")
+        ));
+        assert_eq!(
+            profile.env_vars,
+            &[
+                Env {
+                    name: "FOO".to_string(),
+                    literal: "/tmp/foo".to_string(),
+                },
+                Env {
+                    name: "BAR".to_string(),
+                    literal: "/tmp/bar".to_string(),
+                }
+            ]
+            .into()
+        );
         assert_eq!(profile_iter.next(), None);
     }
 }
