@@ -45,34 +45,39 @@ enum Precedence {
     RemoveOther,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum InsertResult {
-    /// A more specific context entry was inserted, removing a less specific one.
-    RemovedSubset(ContextEntry),
+    /// Context entry was successfully inserted and more specific context entries
+    /// may have been removed.
+    Swapped(BTreeSet<ContextEntry>),
     /// Context entry was ignored because an identical one already exists.
     IgnoredEqual(ContextEntry),
-    /// Context entry was ignored because a more specific one already exists.
+    /// Context entry was ignored because a less specific one already exists.
     IgnoredSubset(ContextEntry),
-    /// Context entry was successfully inserted.
-    Inserted,
 }
 
 impl InsertResult {
     pub fn warning(&self, profile_name: &str) -> Option<String> {
         match self {
-            InsertResult::RemovedSubset(_context) => Some(format!(
-                "profile \"{}\" has overlapping contexts: kept more specific one",
-                profile_name
+            InsertResult::Swapped(contexts) => {
+                if contexts.is_empty() {
+                    None
+                } else {
+                    Some(format!(
+                        "profile \"{}\" has overlapping contexts: \
+                        kept the more specific one and removed {:?}",
+                        profile_name, contexts
+                    ))
+                }
+            }
+            InsertResult::IgnoredEqual(context) => Some(format!(
+                "profile \"{}\" has duplicate contexts: ignoring {:?}",
+                profile_name, context
             )),
-            InsertResult::IgnoredEqual(_context) => Some(format!(
-                "profile \"{}\" has duplicate contexts: ignoring one",
-                profile_name
+            InsertResult::IgnoredSubset(context) => Some(format!(
+                "profile \"{}\" has overlapping contexts: ignoring {:?}",
+                profile_name, context
             )),
-            InsertResult::IgnoredSubset(_context) => Some(format!(
-                "profile \"{}\" has overlapping contexts: ignoring less specific one",
-                profile_name
-            )),
-            InsertResult::Inserted => None,
         }
     }
 }
@@ -84,36 +89,50 @@ pub struct ContextSet {
 }
 
 impl ContextSet {
-    /// Insert a context, automatically removing any superseded contexts.
+    /// Insert a context, automatically removing or ignoring any superseded contexts.
+    ///
     /// Returns detailed information about the insertion result.
-    pub fn insert(&mut self, context: ContextEntry) -> InsertResult {
-        let mut contexts_to_remove = Vec::new();
-
-        for existing in &self.inner {
-            match context.compare_precedence(existing) {
-                Precedence::KeepBoth => continue,
-                Precedence::RemoveOne => {
-                    return InsertResult::IgnoredEqual(context);
-                }
-                Precedence::RemoveSelf => {
-                    return InsertResult::IgnoredSubset(context);
-                }
-                Precedence::RemoveOther => {
-                    contexts_to_remove.push(existing.clone());
-                }
-            }
+    pub fn insert(&mut self, other: ContextEntry) -> InsertResult {
+        use std::ops::ControlFlow;
+        enum BreakStatus {
+            IgnoreEqual,
+            IgnoreSubset,
         }
 
-        if !contexts_to_remove.is_empty() {
-            let removed = contexts_to_remove[0].clone();
-            for to_remove in contexts_to_remove {
-                self.inner.remove(&to_remove);
+        // We could use BTreeSet::extract_if() instead (when stable enough).
+        let status = self
+            .inner
+            .iter()
+            // Only walk one time and stop ASAP.
+            .try_fold(Vec::new(), |mut to_remove, existing| {
+                match existing.compare_precedence(&other) {
+                    Precedence::RemoveOne => ControlFlow::Break(BreakStatus::IgnoreEqual),
+                    Precedence::RemoveOther => ControlFlow::Break(BreakStatus::IgnoreSubset),
+                    Precedence::KeepBoth => ControlFlow::Continue(to_remove),
+                    Precedence::RemoveSelf => {
+                        to_remove.push(existing.clone());
+                        ControlFlow::Continue(to_remove)
+                    }
+                }
+            });
+
+        match status {
+            ControlFlow::Break(BreakStatus::IgnoreEqual) => InsertResult::IgnoredEqual(other),
+            ControlFlow::Break(BreakStatus::IgnoreSubset) => InsertResult::IgnoredSubset(other),
+            ControlFlow::Continue(to_remove) => {
+                let mut removed_set = BTreeSet::new();
+                for item in to_remove {
+                    if self.inner.remove(&item) {
+                        removed_set.insert(item);
+                    } else {
+                        // This branch is unreachable because item always comes from self.inner .
+                        #[cfg(test)]
+                        unreachable!();
+                    }
+                }
+                self.inner.insert(other);
+                InsertResult::Swapped(removed_set)
             }
-            self.inner.insert(context);
-            InsertResult::RemovedSubset(removed)
-        } else {
-            self.inner.insert(context);
-            InsertResult::Inserted
         }
     }
 
@@ -144,6 +163,130 @@ impl<'a> IntoIterator for &'a ContextSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_insert_when_beneath() {
+        let mut ctx_set = ContextSet::default();
+
+        let ctx_empty = ContextEntry { when_beneath: None };
+        assert_eq!(
+            ctx_set.insert(ctx_empty.clone()),
+            InsertResult::Swapped([].into())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_empty));
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert the same value.
+        assert_eq!(
+            ctx_set.insert(ctx_empty.clone()),
+            InsertResult::IgnoredEqual(ctx_empty.clone())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_empty));
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert a value that supersedes the previous one.
+        let ctx_foo_b = ContextEntry {
+            when_beneath: Some("/foo/b".into()),
+        };
+        assert_eq!(
+            ctx_set.insert(ctx_foo_b.clone()),
+            InsertResult::Swapped([ctx_empty.clone()].into())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo_b));
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert a sibling value, that should be ordered before the previous one.
+        let ctx_foo_a = ContextEntry {
+            when_beneath: Some("/foo/a".into()),
+        };
+        assert_eq!(
+            ctx_set.insert(ctx_foo_a.clone()),
+            InsertResult::Swapped([].into())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo_a));
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo_b));
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert again an empty context.
+        assert_eq!(
+            ctx_set.insert(ctx_empty.clone()),
+            InsertResult::IgnoredSubset(ctx_empty.clone())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo_a));
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo_b));
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert a value that supersedes the previous one.
+        let ctx_foo = ContextEntry {
+            when_beneath: Some("/foo".into()),
+        };
+        assert_eq!(
+            ctx_set.insert(ctx_foo.clone()),
+            InsertResult::Swapped([ctx_foo_a.clone(), ctx_foo_b.clone()].into())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo));
+        // Ignored ctx_foo
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert again a superseded when_beneath.
+        assert_eq!(
+            ctx_set.insert(ctx_foo_a.clone()),
+            InsertResult::IgnoredSubset(ctx_foo_a.clone())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo));
+        // Ignored ctx_foo_a
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert a duplicated value with when_beneath.
+        assert_eq!(
+            ctx_set.insert(ctx_foo.clone()),
+            InsertResult::IgnoredEqual(ctx_foo.clone())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo));
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert context for /bar .
+        let ctx_bar = ContextEntry {
+            when_beneath: Some("/bar".into()),
+        };
+        assert_eq!(
+            ctx_set.insert(ctx_bar.clone()),
+            InsertResult::Swapped([].into())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_bar));
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo));
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+
+        // Insert a when_beneath superseded value.
+        assert_eq!(
+            ctx_set.insert(ctx_foo_a.clone()),
+            InsertResult::IgnoredSubset(ctx_foo_a.clone())
+        );
+        let mut ctx_iter = ctx_set.iter();
+        assert_eq!(ctx_iter.next(), Some(&ctx_bar));
+        assert_eq!(ctx_iter.next(), Some(&ctx_foo));
+        // Ignored ctx_foo_a .
+        assert_eq!(ctx_iter.next(), None);
+        drop(ctx_iter);
+    }
 
     #[test]
     fn test_compare_precedence() {
