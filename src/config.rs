@@ -81,7 +81,7 @@ pub struct Profile {
 
 type Profiles = BTreeMap<String, Profile>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct IslandConfig {
     profiles: Profiles,
     profiles_dir: PathBuf,
@@ -96,14 +96,17 @@ impl IslandConfig {
     ///
     /// The profile name is derived from the directory name.
     pub fn new() -> Result<Self, ConfigError> {
-        let profiles_dir = Self::get_config_dir()?.join("profiles");
-        let profiles_entries =
-            fs::read_dir(&profiles_dir).map_err(|source| ConfigError::ProfilesDirectory {
-                path: profiles_dir.display().to_string(),
+        let mut config = Self {
+            profiles_dir: Self::get_config_dir()?.join("profiles"),
+            ..Default::default()
+        };
+        let profiles_entries = fs::read_dir(&config.profiles_dir).map_err(|source| {
+            ConfigError::ProfilesDirectory {
+                path: config.profiles_dir.display().to_string(),
                 source,
-            })?;
+            }
+        })?;
 
-        let mut profiles = Profiles::default();
         for entry in profiles_entries {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
@@ -111,7 +114,7 @@ impl IslandConfig {
                 let island_toml_path = entry.path().join("profile.toml");
 
                 if island_toml_path.exists() {
-                    let profile = Self::parse_profile_config(
+                    let profile = config.parse_profile_config(
                         &fs::read_to_string(&island_toml_path)?,
                         &profile_name,
                         |path| path.canonicalize(),
@@ -121,15 +124,12 @@ impl IslandConfig {
                     // of a directory and it returns the same entry several
                     // times. In this case, just ignore the previous similar
                     // one(s).
-                    profiles.insert(profile_name, profile);
+                    config.profiles.insert(profile_name, profile);
                 }
             }
         }
 
-        Ok(Self {
-            profiles,
-            profiles_dir,
-        })
+        Ok(config)
     }
 
     fn get_config_dir() -> Result<PathBuf, ConfigError> {
@@ -144,6 +144,7 @@ impl IslandConfig {
     }
 
     fn parse_profile_config<F>(
+        &self,
         content: &str,
         profile_name: &str,
         canonicalize_path: F,
@@ -292,30 +293,37 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    fn create_test_profiles<I>(profiles_data: I) -> Profiles
+    fn create_test_config_with_profiles<I>(profiles_data: I) -> IslandConfig
     where
         I: IntoIterator<Item = (&'static str, &'static str)>,
     {
-        let mut profiles = Profiles::default();
+        let mut config = IslandConfig {
+            profiles_dir: "/test/config/profiles/dir".into(),
+            ..Default::default()
+        };
 
         for (profile_name, toml_content) in profiles_data {
-            let profile = IslandConfig::parse_profile_config(
-                toml_content,
-                profile_name,
-                // Pure function, independent from the filesystem (i.e. do not check if the path exists).
-                |p| Ok(p.to_path_buf()),
-            )
-            .unwrap();
+            let profile = config
+                .parse_profile_config(
+                    toml_content,
+                    profile_name,
+                    // Pure function, independent from the filesystem (i.e. do not check if the path exists).
+                    |p| Ok(p.to_path_buf()),
+                )
+                .unwrap();
 
             // Ensure profile names are unique - insert should return None (no previous value)
             assert!(
-                profiles.insert(profile_name.to_string(), profile).is_none(),
+                config
+                    .profiles
+                    .insert(profile_name.to_string(), profile)
+                    .is_none(),
                 "Duplicate profile name in test data: {}",
                 profile_name
             );
         }
 
-        profiles
+        config
     }
 
     fn create_test_config() -> IslandConfig {
@@ -344,15 +352,12 @@ when_beneath = "/home/user/projects/work1"
             ("standalone", ""),
         ];
 
-        IslandConfig {
-            profiles: create_test_profiles(profiles_data),
-            profiles_dir: Default::default(),
-        }
+        create_test_config_with_profiles(profiles_data)
     }
 
     #[test]
     fn test_empty_profile() {
-        create_test_profiles([("empty", "")]);
+        create_test_config_with_profiles([("empty", "")]);
     }
 
     #[test]
@@ -494,10 +499,7 @@ when_beneath = "/foo"
             ),
         ];
 
-        let config = IslandConfig {
-            profiles: create_test_profiles(profiles_data),
-            profiles_dir: Default::default(),
-        };
+        let config = create_test_config_with_profiles(profiles_data);
 
         let mut profile_iter = config.profiles.iter();
 
