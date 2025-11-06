@@ -4,7 +4,7 @@ use crate::context::{ContextEntry, ContextSet};
 use landlockconfig::{Config, ConfigFormat, ParseDirectoryError, ResolveError, ResolvedConfig};
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -38,6 +38,25 @@ pub struct ResolvedProfile<'a> {
     pub name: &'a str,
     pub context: Option<&'a ContextEntry>,
     pub config: ResolvedConfig,
+}
+
+/// The greatest has the more tailored context, otherwise fall back to
+/// lexicographic ordering of the profile's name.
+impl Ord for ResolvedProfile<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // This ordering is efficient and enough to ensure a consistent ordering
+        // considering elements returned by resolve_profiles_by_path().  There
+        // is no need to rely on compare_precedence().
+        self.context
+            .cmp(&other.context)
+            .then_with(|| self.name.cmp(other.name))
+    }
+}
+
+impl PartialOrd for ResolvedProfile<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -191,7 +210,7 @@ impl IslandConfig {
         &self,
         canonicalized_path: P,
         load_config: F,
-    ) -> Result<Vec<ResolvedProfile<'_>>, ConfigError>
+    ) -> Result<BTreeSet<ResolvedProfile<'_>>, ConfigError>
     where
         P: AsRef<Path>,
         F: Fn(&str) -> Result<ResolvedConfig, E>,
@@ -200,7 +219,7 @@ impl IslandConfig {
         let canonicalized_path = canonicalized_path.as_ref();
 
         // Consistently store sorted paths for scope ordering and determinism.
-        let resolved: Result<Vec<_>, ConfigError> = self
+        let resolved: Result<BTreeSet<_>, ConfigError> = self
             .profiles
             .iter()
             .filter_map(|(profile_name, profile)| {
@@ -392,18 +411,27 @@ scoped = ["signal"]
     fn test_resolve_profiles_matches() {
         let config = create_test_config();
 
-        let result = config.resolve_profiles_by_path(
-            "/home/user/projects",
-            |_| -> Result<ResolvedConfig, ConfigError> { Ok(create_mock_resolved_config()) },
-        );
+        let result = config
+            .resolve_profiles_by_path(
+                "/home/user/projects",
+                |_| -> Result<ResolvedConfig, ConfigError> { Ok(create_mock_resolved_config()) },
+            )
+            .unwrap();
+
+        let mut resolved_iter = result.iter();
 
         assert!(matches!(
-            result.as_deref(),
-            Ok([
-                ResolvedProfile { name, .. },
-                ResolvedProfile { name: name2, .. }
-            ]) if *name == "home" && *name2 == "projects"
+            resolved_iter.next().unwrap(),
+            ResolvedProfile { name: "home", .. },
         ));
+        assert!(matches!(
+            resolved_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "projects",
+                ..
+            },
+        ));
+        assert_eq!(resolved_iter.next(), None);
     }
 
     #[test]
@@ -580,6 +608,250 @@ when_beneath = "/foo"
                 ..
             }
         ));
+        assert_eq!(profile_iter.next(), None);
+    }
+
+    fn create_resolved_profile<'a>(
+        name: &'a str,
+        context: Option<&'a ContextEntry>,
+    ) -> ResolvedProfile<'a> {
+        ResolvedProfile {
+            name,
+            context,
+            config: create_mock_resolved_config(),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::nonminimal_bool)]
+    fn test_resolved_profile_ordering() {
+        // Empty contexts.
+        let ctx_beneath_none = Some(&ContextEntry { when_beneath: None });
+        let profile1 = create_resolved_profile("a", ctx_beneath_none);
+        let profile2 = create_resolved_profile("a", ctx_beneath_none);
+        assert!(!(profile1 < profile2));
+        assert!(profile1 == profile2);
+        assert!(!(profile1 > profile2));
+
+        // Fall back to lexicographic order.
+        let profile1 = create_resolved_profile("a", ctx_beneath_none);
+        let profile2 = create_resolved_profile("b", ctx_beneath_none);
+        assert!(profile1 < profile2);
+        assert!(!(profile1 == profile2));
+        assert!(!(profile1 > profile2));
+
+        // Empty vs. non-empty context.
+        let ctx_beneath_foo = Some(&ContextEntry {
+            when_beneath: Some("/foo".into()),
+        });
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("a", ctx_beneath_none);
+        assert!(!(profile1 < profile2));
+        assert!(!(profile1 == profile2));
+        assert!(profile1 > profile2);
+
+        // Do not fall back to lexicographic order.
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("b", ctx_beneath_none);
+        assert!(!(profile1 < profile2));
+        assert!(!(profile1 == profile2));
+        assert!(profile1 > profile2);
+
+        // Context with sibling paths.
+        let ctx_beneath_bar = Some(&ContextEntry {
+            when_beneath: Some("/bar".into()),
+        });
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("a", ctx_beneath_bar);
+        assert!(!(profile1 < profile2));
+        assert!(!(profile1 == profile2));
+        assert!(profile1 > profile2);
+
+        // Do not fall back to lexicographic order.
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("b", ctx_beneath_bar);
+        assert!(!(profile1 < profile2));
+        assert!(!(profile1 == profile2));
+        assert!(profile1 > profile2);
+
+        // Context with nested path.
+        let ctx_beneath_foo_bar = Some(&ContextEntry {
+            when_beneath: Some("/foo/bar".into()),
+        });
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("a", ctx_beneath_foo_bar);
+        assert!(profile1 < profile2);
+        assert!(!(profile1 == profile2));
+        assert!(!(profile1 > profile2));
+
+        // Do not fall back to lexicographic order.
+        let profile1 = create_resolved_profile("b", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("a", ctx_beneath_foo_bar);
+        assert!(profile1 < profile2);
+        assert!(!(profile1 == profile2));
+        assert!(!(profile1 > profile2));
+
+        // Context with same path.
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("a", ctx_beneath_foo);
+        assert!(!(profile1 < profile2));
+        assert!(profile1 == profile2);
+        assert!(!(profile1 > profile2));
+
+        // Fall back to lexicographic order.
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile2 = create_resolved_profile("b", ctx_beneath_foo);
+        assert!(profile1 < profile2);
+        assert!(!(profile1 == profile2));
+        assert!(!(profile1 > profile2));
+    }
+
+    #[test]
+    fn test_resolved_profile_sorted() {
+        let ctx_beneath_none = Some(&ContextEntry { when_beneath: None });
+        let ctx_beneath_foo = Some(&ContextEntry {
+            when_beneath: Some("/foo".into()),
+        });
+        let ctx_beneath_bar = Some(&ContextEntry {
+            when_beneath: Some("/bar".into()),
+        });
+        let ctx_beneath_foo_bar = Some(&ContextEntry {
+            when_beneath: Some("/foo/bar".into()),
+        });
+
+        let sorted = [
+            create_resolved_profile("a", ctx_beneath_none),
+            create_resolved_profile("b", ctx_beneath_none),
+            create_resolved_profile("a", ctx_beneath_bar),
+            create_resolved_profile("b", ctx_beneath_bar),
+            create_resolved_profile("a", ctx_beneath_foo),
+            create_resolved_profile("b", ctx_beneath_foo),
+            create_resolved_profile("a", ctx_beneath_foo_bar),
+            create_resolved_profile("b", ctx_beneath_foo_bar),
+        ];
+        // Create a BTreeSet from unsorted and duplicated profiles.
+        let set: BTreeSet<_> = sorted.iter().rev().chain(sorted.iter()).collect();
+
+        // Check growing order.
+        assert_eq!(sorted.len(), set.len());
+        for (i, profile) in set.into_iter().enumerate() {
+            assert_eq!(*profile, sorted[i]);
+        }
+    }
+
+    fn create_test_config_for_ordering() -> IslandConfig {
+        let profiles_data = [
+            (
+                "d",
+                r#"
+[[context]]
+when_beneath = "/foo"
+"#,
+            ),
+            (
+                "c",
+                r#"
+[[context]]
+when_beneath = "/foo"
+"#,
+            ),
+            (
+                "b",
+                r#"
+[[context]]
+when_beneath = "/"
+"#,
+            ),
+            (
+                "a",
+                r#"
+[[context]]
+when_beneath = "/foo/bar"
+"#,
+            ),
+        ];
+        create_test_config_with_profiles(profiles_data)
+    }
+
+    #[test]
+    fn test_resolve_profile_by_path_sorted() {
+        let config = create_test_config_for_ordering();
+
+        let resolved_profiles = config
+            .resolve_profiles_by_path("/foo/bar", |_| -> Result<ResolvedConfig, ConfigError> {
+                Ok(create_mock_resolved_config())
+            })
+            .unwrap();
+        let mut profile_iter = resolved_profiles.iter();
+
+        assert!(matches!(
+            profile_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "b",
+                context: Some(&ContextEntry {
+                    when_beneath: Some(ref path),
+                }),
+                ..
+            } if path == &PathBuf::from("/")
+        ));
+
+        assert!(matches!(
+            profile_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "c",
+                context: Some(&ContextEntry {
+                    when_beneath: Some(ref path),
+                }),
+                ..
+            } if path == &PathBuf::from("/foo")
+        ));
+
+        assert!(matches!(
+            profile_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "d",
+                context: Some(&ContextEntry {
+                    when_beneath: Some(ref path),
+                }),
+                ..
+            } if path == &PathBuf::from("/foo")
+        ));
+
+        assert!(matches!(
+            profile_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "a",
+                context: Some(&ContextEntry {
+                    when_beneath: Some(ref path),
+                }),
+                ..
+            } if path == &PathBuf::from("/foo/bar")
+        ));
+
+        assert_eq!(profile_iter.next(), None);
+    }
+
+    #[test]
+    fn test_resolve_profile_by_name_unsorted() {
+        let config = create_test_config_for_ordering();
+        let name_order = ["d", "c", "a", "b"];
+        let resolved_profiles = config
+            .resolve_profiles_by_names(&name_order, |_| -> Result<ResolvedConfig, ConfigError> {
+                Ok(create_mock_resolved_config())
+            })
+            .unwrap();
+
+        let mut profile_iter = resolved_profiles.iter();
+        for n in &name_order {
+            assert!(matches!(
+                profile_iter.next().unwrap(),
+                ResolvedProfile {
+                    name,
+                    context: None,
+                    ..
+                } if name == n
+            ));
+        }
         assert_eq!(profile_iter.next(), None);
     }
 }

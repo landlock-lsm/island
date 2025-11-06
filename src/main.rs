@@ -163,7 +163,10 @@ fn main() -> Result<(), IslandError> {
             } else {
                 // Use automatic profile resolution based on context.
                 let canonicalized_cwd = std::env::current_dir()?.canonicalize()?;
-                island_config.resolve_profiles_by_path(canonicalized_cwd, load_config)?
+                island_config
+                    .resolve_profiles_by_path(canonicalized_cwd, load_config)?
+                    .into_iter()
+                    .collect()
             };
 
             run(resolved_profiles, &command, &verbose)
