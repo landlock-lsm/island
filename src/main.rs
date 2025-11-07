@@ -11,6 +11,8 @@ use config::{ConfigError, IslandConfig, ResolvedProfile};
 
 mod context;
 
+mod workspace;
+
 struct Verbose(bool);
 
 impl Verbose {
@@ -103,6 +105,7 @@ enum IslandError {
 
 fn run(
     resolved_profiles: Vec<ResolvedProfile<'_>>,
+    island_config: &IslandConfig,
     command_args: &[String],
     verbose: &Verbose,
 ) -> Result<(), IslandError> {
@@ -120,12 +123,22 @@ fn run(
 
     let mut env_vars = BTreeMap::default();
 
+    let workspace_manager =
+        workspace::WorkspaceManager::new(island_config, &resolved_profiles, verbose)?;
+
     // Apply each profile's restrictions in order (broadest scope first).
     for resolved_profile in resolved_profiles {
-        let (ruleset, rule_errors) = resolved_profile.config.build_ruleset()?;
+        let (mut ruleset, rule_errors) = resolved_profile.config.build_ruleset()?;
         for rule_error in rule_errors {
             eprintln!("Warning: {}", rule_error);
         }
+
+        // Add workspace directory access rules to ALL rulesets if the final effective
+        // workspace value is true. This is necessary because Landlock uses nested
+        // restrictions - if any parent ruleset doesn't allow workspace access,
+        // child rulesets can't grant it either.
+        ruleset = workspace_manager.update_ruleset(ruleset, verbose)?;
+
         // TODO: Do not rely on the kernel to enforce nested sandboxing (limited to 16 layers).
         ruleset.restrict_self()?;
 
@@ -141,6 +154,10 @@ fn run(
             env_vars.insert(&env.name, &env.literal);
         }
     }
+
+    // Add workspace environment variables to the environment that will be passed to the child process
+    workspace_manager.update_environment(&mut env_vars, verbose);
+
     // TODO: Parse and apply --env arguments
 
     // Clap ensures command_args contains at least one element due to num_args = 1..
@@ -182,7 +199,7 @@ fn main() -> Result<(), IslandError> {
                     .collect()
             };
 
-            run(resolved_profiles, &command, &verbose)
+            run(resolved_profiles, &island_config, &command, &verbose)
         }
     }
 }

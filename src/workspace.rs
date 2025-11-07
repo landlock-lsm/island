@@ -1,0 +1,440 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Workspace environment management for Island profiles.
+//!
+//! Provides isolated workspace directories for each profile, managing XDG
+//! directories and `TMPDIR`.  Each profile gets its own separate workspace to
+//! prevent interference between sandboxed environments.
+
+use crate::{
+    config::{IslandConfig, ResolvedProfile},
+    IslandError, Verbose,
+};
+use landlock::{path_beneath_rules, Access, AccessFs, RulesetCreatedAttr, ABI};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs, io,
+    os::unix::fs::{symlink, MetadataExt},
+    path::PathBuf,
+};
+
+/// XDG directories
+///
+/// These directories should all be created in directories own by the current
+/// user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Xdg {
+    /// XDG configuration directory (`XDG_CONFIG_HOME`)
+    ConfigHome,
+    /// XDG data directory (`XDG_DATA_HOME`)
+    DataHome,
+    /// XDG state directory (`XDG_STATE_HOME`)
+    StateHome,
+    /// XDG cache directory (`XDG_CACHE_HOME`)
+    CacheHome,
+    /// XDG runtime directory (`XDG_RUNTIME_DIR`)
+    RuntimeDir,
+}
+
+impl Xdg {
+    /// Returns the environment variable name for this XDG directory.
+    const fn env_var(&self) -> &'static str {
+        match self {
+            Xdg::ConfigHome => "XDG_CONFIG_HOME",
+            Xdg::DataHome => "XDG_DATA_HOME",
+            Xdg::StateHome => "XDG_STATE_HOME",
+            Xdg::CacheHome => "XDG_CACHE_HOME",
+            Xdg::RuntimeDir => "XDG_RUNTIME_DIR",
+        }
+    }
+
+    /// Returns the symlink name used in profile directories.
+    const fn symlink_name(&self) -> &'static str {
+        match self {
+            Xdg::ConfigHome => "workspace-config",
+            Xdg::DataHome => "workspace-data",
+            Xdg::StateHome => "workspace-state",
+            Xdg::CacheHome => "workspace-cache",
+            Xdg::RuntimeDir => "workspace-run",
+        }
+    }
+
+    /// Returns the fallback path relative to `$HOME`, or `None` if no fallback exists.
+    const fn fallback_path(&self) -> Option<&'static str> {
+        match self {
+            Xdg::ConfigHome => Some(".config"),
+            Xdg::DataHome => Some(".local/share"),
+            Xdg::StateHome => Some(".local/state"),
+            Xdg::CacheHome => Some(".cache"),
+            Xdg::RuntimeDir => None,
+        }
+    }
+
+    /// Returns the subdirectory name used for Island profile isolation.
+    const fn subdir(&self) -> &'static str {
+        match self {
+            Xdg::ConfigHome => "island-config-profiles",
+            Xdg::DataHome => "island-data-profiles",
+            Xdg::StateHome => "island-state-profiles",
+            Xdg::CacheHome => "island-cache-profiles",
+            Xdg::RuntimeDir => "island-run-profiles",
+        }
+    }
+}
+
+/// Workspace directory types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Workspace {
+    /// XDG Base Directory specification directory
+    Xdg(Xdg),
+    /// Temporary directory
+    TmpDir,
+}
+
+impl Workspace {
+    /// Returns the environment variable name for this workspace type.
+    const fn env_var(&self) -> &'static str {
+        match self {
+            Workspace::Xdg(xdg) => xdg.env_var(),
+            Workspace::TmpDir => "TMPDIR",
+        }
+    }
+
+    /// Returns the symlink name used in profile directories.
+    const fn symlink_name(&self) -> &'static str {
+        match self {
+            Workspace::Xdg(xdg) => xdg.symlink_name(),
+            Workspace::TmpDir => "workspace-tmp",
+        }
+    }
+
+    /// Resolves a workspace path safely, validating ownership for temporary environments.
+    ///
+    /// Returns the canonicalized target path after performing security validations.
+    /// For temporary directories, validates that symlinks and their first-level targets
+    /// are owned by the current user. For XDG directories, performs basic path resolution.
+    /// Once ownership is validated, trusts the user's symlink configurations.
+    ///
+    /// This prevents multiple attack vectors:
+    ///
+    /// **Post-reboot attacks**: Other users create malicious symlinks after system cleanup
+    /// when temp directories are removed but profile symlinks remain. This is detected by
+    /// validating that both symlink and first-level target have matching ownership.
+    ///
+    /// **Confused deputy attacks**: Other users or processes make symlinks point to
+    /// legitimate directories owned by the current user (like ~/.ssh or ~/Documents) causing
+    /// temp files to be written in unexpected locations. Protection is provided because:
+    /// 1. Island creates symlinks pointing to directories Island also created.
+    /// 2. Both symlink and target are owned by the current user.
+    /// 3. If someone changes the symlink to point elsewhere, they must also own
+    ///    that target location for validation to pass.
+    /// 4. If they own the target but aren't the current user, validation fails.
+    /// 5. If they are the current user, it's their own directory so no privilege escalation.
+    ///
+    /// **Shared /tmp threat model**: In traditional shared /tmp directories, different
+    /// processes or sandboxes share the same temp space, creating information leakage
+    /// risks both within and across users. Each Island profile gets its own isolated
+    /// temporary directory (e.g., `/tmp/island-tmp-1000-profile1-abc123/`) to prevent:
+    /// - Cross-user interference when multiple users run Island.
+    /// - Cross-profile data leakage between different Landlock sandboxes of same user.
+    /// - One sandbox reading temporary files from another sandbox.
+    /// - Profile isolation bypass through shared temporary storage.
+    ///
+    /// The UID in the directory name provides namespace separation between users,
+    /// while the profile name provides separation between different sandboxes
+    /// of the same user. File ownership validation handles cross-user security,
+    /// while directory separation handles intra-user isolation.
+    ///
+    /// The user's own symlink configurations are trusted after validating the security boundary.
+    fn resolve_directory(&self, path: &PathBuf) -> io::Result<PathBuf> {
+        // XXX: Should we really canonicalize?  This means that the directories
+        // cannot be changed an runtime.
+        let canonical_path = match self {
+            Workspace::TmpDir => {
+                if path.is_symlink() {
+                    // Get symlink metadata (not following the link).
+                    let symlink_metadata = fs::symlink_metadata(path)?;
+                    let symlink_uid = symlink_metadata.uid();
+
+                    // Read the symlink target (first level only).
+                    let target_path = std::fs::read_link(path)?;
+
+                    // Convert relative paths to absolute based on symlink's parent.
+                    let absolute_target = if target_path.is_absolute() {
+                        target_path
+                    } else {
+                        path.parent()
+                            .ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "Symlink has no parent directory",
+                                )
+                            })?
+                            .join(&target_path)
+                    };
+
+                    // Get first-level target metadata (not following further symlinks).
+                    let target_metadata = fs::symlink_metadata(&absolute_target)?;
+                    let target_uid = target_metadata.uid();
+
+                    // Validate symlink and target ownership match.
+                    if symlink_uid != target_uid {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "Security: Symlink {} (UID {}) points to target owned by different UID {}: {}",
+                                path.display(),
+                                symlink_uid,
+                                target_uid,
+                                absolute_target.display()
+                            ),
+                        ));
+                    }
+
+                    // Return canonicalized target (trust user's symlink chains
+                    // after ownership validation).
+                    absolute_target.canonicalize()?
+                } else {
+                    // For non-symlinks, just return the canonical path.
+                    path.canonicalize()?
+                }
+            }
+            Workspace::Xdg(_) => {
+                // For XDG directories, just return the canonical path.
+                path.canonicalize()?
+            }
+        };
+
+        // Ensure the final target is a directory for workspace consistency.
+        let metadata = fs::metadata(&canonical_path)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Workspace path {} is not a directory",
+                    canonical_path.display()
+                ),
+            ));
+        }
+
+        Ok(canonical_path)
+    }
+
+    /// Returns the default path for this workspace environment.
+    pub fn create_directory(
+        &self,
+        profile_name: &str,
+        original_env: &HashMap<String, Option<String>>,
+    ) -> io::Result<PathBuf> {
+        match self {
+            Workspace::TmpDir => {
+                // Get effective user ID for name collision avoidance Use
+                // effective UID since that's what determines ownership of newly
+                // created files/directories and matches what tempfile will
+                // actually use for directory ownership.
+                let current_uid = unsafe { libc::geteuid() };
+
+                let temp_dir = tempfile::Builder::new()
+                    .prefix(&format!("island-tmp-{}-{}-", current_uid, profile_name))
+                    .tempdir_in(std::env::temp_dir())
+                    .map_err(|e| {
+                        std::io::Error::other(format!(
+                            "Failed to create secure temporary directory: {}",
+                            e
+                        ))
+                    })?;
+                Ok(temp_dir.keep())
+            }
+            Workspace::Xdg(xdg) => {
+                // Resolve XDG directory path with fallbacks.
+                let base_path = if let Some(env_value) =
+                    original_env.get(xdg.env_var()).and_then(|opt| opt.as_ref())
+                {
+                    PathBuf::from(env_value)
+                } else if let Some(fallback) = xdg.fallback_path() {
+                    let home = std::env::var("HOME").map_err(|_| {
+                        io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!(
+                                "Neither {} nor HOME environment variables are set",
+                                xdg.env_var()
+                            ),
+                        )
+                    })?;
+                    PathBuf::from(home).join(fallback)
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("{} environment variable is not set", xdg.env_var()),
+                    ));
+                };
+                let dir = base_path.join(xdg.subdir()).join(profile_name);
+                fs::create_dir_all(&dir)?;
+                Ok(dir)
+            }
+        }
+    }
+}
+
+/// All supported workspace environment variables.
+const WORKSPACES: &[Workspace] = &[
+    Workspace::Xdg(Xdg::ConfigHome),
+    Workspace::Xdg(Xdg::DataHome),
+    Workspace::Xdg(Xdg::StateHome),
+    Workspace::Xdg(Xdg::CacheHome),
+    Workspace::Xdg(Xdg::RuntimeDir),
+    Workspace::TmpDir,
+];
+
+/// Manages workspace setup and configuration for a profile.
+#[derive(Default)]
+pub struct WorkspaceManager {
+    env_vars: BTreeMap<String, String>,
+}
+
+impl WorkspaceManager {
+    /// Creates a workspace manager for the last resolved profile.
+    pub fn new(
+        island_config: &IslandConfig,
+        resolved_profiles: &[ResolvedProfile],
+        verbose: &Verbose,
+    ) -> Result<Self, IslandError> {
+        let Some(last_profile) = resolved_profiles.last() else {
+            return Ok(Default::default());
+        };
+
+        if !last_profile.workspace {
+            return Ok(Default::default());
+        }
+
+        let profile_dir = island_config.profile_dir(last_profile.name);
+
+        // Collect original workspace environment variables before any modifications.
+        let original_env: HashMap<String, Option<String>> = WORKSPACES
+            .iter()
+            .map(|env| (env.env_var().to_string(), std::env::var(env.env_var()).ok()))
+            .collect();
+
+        // Set up workspace directories for all workspace environment variables.
+        let mut env_vars: BTreeMap<String, String> = BTreeMap::new();
+
+        for workspace in WORKSPACES {
+            let env_var = workspace.env_var();
+            let symlink_path = profile_dir.join(workspace.symlink_name());
+
+            // Try to use existing path, removing if error (e.g. broken symlink).
+            let target_path = if symlink_path.exists() {
+                // Validate ownership and resolve path securely for this
+                // workspace environment type.
+                match workspace.resolve_directory(&symlink_path) {
+                    Ok(resolved_path) => {
+                        verbose.print(|| {
+                            if symlink_path != resolved_path {
+                                format!(
+                                    "Using existing directory: {} -> {}",
+                                    symlink_path.display(),
+                                    resolved_path.display()
+                                )
+                            } else {
+                                format!("Using existing directory: {}", resolved_path.display())
+                            }
+                        });
+                        Some(resolved_path)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: failed to create directory {}: {}",
+                            symlink_path.display(),
+                            e
+                        );
+
+                        // Remove the insecure , we'll create a new temp directory below.
+                        verbose.print(|| format!("Removing symlink: {}", symlink_path.display()));
+                        fs::remove_file(&symlink_path)?;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let target_path = match target_path {
+                Some(path) => path,
+                None => {
+                    // Create a new directory for this workspace environment type.
+                    let target_path =
+                        workspace.create_directory(last_profile.name, &original_env)?;
+                    verbose.print(|| {
+                        format!(
+                            "Creating symlink {} -> {}",
+                            symlink_path.display(),
+                            target_path.display()
+                        )
+                    });
+                    symlink(&target_path, &symlink_path)?;
+                    target_path
+                }
+            };
+
+            env_vars.insert(
+                env_var.to_string(),
+                target_path.to_string_lossy().to_string(),
+            );
+            verbose.print(|| format!("Set {}={}", env_var, target_path.display()));
+        }
+
+        Ok(Self { env_vars })
+    }
+
+    pub fn update_ruleset(
+        &self,
+        ruleset: landlock::RulesetCreated,
+        verbose: &Verbose,
+    ) -> Result<landlock::RulesetCreated, IslandError> {
+        let landlock_abi = ABI::V6;
+
+        for (env_var, path) in &self.env_vars {
+            verbose.print(|| format!("Allowing access to workspace {}: {}", env_var, path));
+        }
+
+        // Add all workspace directories with full filesystem access permissions
+        let rules = path_beneath_rules(self.env_vars.values(), AccessFs::from_all(landlock_abi));
+        Ok(ruleset.add_rules(rules)?)
+    }
+
+    pub fn update_environment<'a>(
+        &'a self,
+        env_vars: &mut BTreeMap<&'a String, &'a String>,
+        verbose: &Verbose,
+    ) {
+        for (var_name, var_value) in &self.env_vars {
+            verbose.print(|| format!("Setting workspace {}={}", var_name, var_value));
+            if env_vars.insert(var_name, var_value).is_some() {
+                eprintln!(
+                    "Warning: Overwriting existing environment variable {} with workspace value",
+                    var_name
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_workspace_manager_empty() {
+        let verbose = Verbose(false);
+        let config = crate::config::tests::create_test_config_with_profiles(None);
+
+        let manager = WorkspaceManager::new(&config, &[], &verbose).unwrap();
+        assert!(manager.env_vars.is_empty());
+
+        let resolved_profile = crate::config::tests::create_resolved_profile("foo", None);
+        assert!(resolved_profile.workspace);
+
+        // TODO: Pass a closure to WorkspaceManager::new() for environment
+        // variables, and test with a resolved profile.
+    }
+}

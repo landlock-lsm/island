@@ -45,6 +45,28 @@ pub struct ResolvedProfile<'a> {
     pub context: Option<&'a ContextEntry>,
     pub config: ResolvedConfig,
     pub env_vars: &'a BTreeSet<Env>,
+    pub workspace: bool,
+}
+
+impl<'a> ResolvedProfile<'a> {
+    fn new<F, E>(
+        name: &'a str,
+        profile: &'a Profile,
+        load_config: F,
+        context: Option<&'a ContextEntry>,
+    ) -> Result<Self, ConfigError>
+    where
+        F: Fn(&str) -> Result<ResolvedConfig, E>,
+        E: Into<ConfigError>,
+    {
+        Ok(Self {
+            name,
+            context,
+            config: load_config(name).map_err(|e| e.into())?,
+            env_vars: &profile.env_vars,
+            workspace: profile.workspace,
+        })
+    }
 }
 
 /// The greatest has the more tailored context, otherwise fall back to
@@ -94,6 +116,7 @@ struct ProfileConfig {
     #[serde(rename = "context")]
     contexts: Option<Vec<TomlContextEntry>>,
     env: Option<Vec<Env>>,
+    workspace: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +128,7 @@ struct TomlContextEntry {
 pub struct Profile {
     pub contexts: ContextSet,
     pub env_vars: BTreeSet<Env>,
+    pub workspace: bool,
 }
 
 type Profiles = BTreeMap<String, Profile>;
@@ -208,6 +232,8 @@ impl IslandConfig {
 
         profile.env_vars.extend(cfg.env.unwrap_or_default());
 
+        profile.workspace = cfg.workspace.unwrap_or(true);
+
         Ok(profile)
     }
 
@@ -245,12 +271,7 @@ impl IslandConfig {
                         )
                     })
                     .map(|context| {
-                        Ok(ResolvedProfile {
-                            name: profile_name,
-                            context: Some(context),
-                            config: load_config(profile_name).map_err(|e| e.into())?,
-                            env_vars: &profile.env_vars,
-                        })
+                        ResolvedProfile::new(profile_name, profile, &load_config, Some(context))
                     })
             })
             .collect();
@@ -307,24 +328,29 @@ impl IslandConfig {
                         name: profile_name.as_ref().to_string(),
                     })?;
 
-                Ok(ResolvedProfile {
-                    name: profile_key,
+                ResolvedProfile::new(
+                    profile_key,
+                    profile,
+                    &load_config,
                     // Context is always None since we resolved by name.
-                    context: None,
-                    config: load_config(profile_key).map_err(|e| e.into())?,
-                    env_vars: &profile.env_vars,
-                })
+                    None,
+                )
             })
             .collect()
+    }
+
+    /// Returns the path to a specific profile directory.
+    pub fn profile_dir(&self, profile_name: &str) -> PathBuf {
+        self.profiles_dir.join(profile_name)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    fn create_test_config_with_profiles<I>(profiles_data: I) -> IslandConfig
+    pub fn create_test_config_with_profiles<I>(profiles_data: I) -> IslandConfig
     where
         I: IntoIterator<Item = (&'static str, &'static str)>,
     {
@@ -623,7 +649,7 @@ when_beneath = "/foo"
         assert_eq!(profile_iter.next(), None);
     }
 
-    fn create_resolved_profile<'a>(
+    pub fn create_resolved_profile<'a>(
         name: &'a str,
         context: Option<&'a ContextEntry>,
     ) -> ResolvedProfile<'a> {
@@ -634,6 +660,7 @@ when_beneath = "/foo"
             context,
             config: create_mock_resolved_config(),
             env_vars: &EMPTY_BTREE_SET,
+            workspace: true,
         }
     }
 
@@ -931,6 +958,64 @@ literal = "/tmp/bar2"
             ]
             .into()
         );
+        assert_eq!(profile_iter.next(), None);
+    }
+
+    #[test]
+    fn test_parse_config_xdg() {
+        let profiles_data = [
+            (
+                "foo",
+                r#"
+workspace = true
+"#,
+            ),
+            (
+                "bar",
+                r#"
+workspace = false
+"#,
+            ),
+            ("baz", ""),
+        ];
+
+        let config = create_test_config_with_profiles(profiles_data);
+        let resolved_profiles = config
+            .resolve_profiles_by_names(
+                &["foo", "bar", "baz"],
+                |_| -> Result<ResolvedConfig, ConfigError> { Ok(create_mock_resolved_config()) },
+            )
+            .unwrap();
+        let mut profile_iter = resolved_profiles.iter();
+
+        assert!(matches!(
+            profile_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "foo",
+                workspace: true,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            profile_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "bar",
+                workspace: false,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            profile_iter.next().unwrap(),
+            ResolvedProfile {
+                name: "baz",
+                // Default value.
+                workspace: true,
+                ..
+            }
+        ));
+
         assert_eq!(profile_iter.next(), None);
     }
 }
