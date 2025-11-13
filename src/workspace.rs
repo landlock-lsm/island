@@ -13,6 +13,7 @@ use crate::{
 use landlock::{path_beneath_rules, Access, AccessFs, RulesetCreatedAttr, ABI};
 use std::{
     collections::{BTreeMap, HashMap},
+    env::VarError,
     fs, io,
     os::unix::fs::{symlink, MetadataExt},
     path::PathBuf,
@@ -22,6 +23,7 @@ use std::{
 ///
 /// These directories should all be created in directories own by the current
 /// user.
+// TODO: We should probably handle XDG_DOWNLOAD_DIR per profile as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Xdg {
     /// XDG configuration directory (`XDG_CONFIG_HOME`)
@@ -221,11 +223,15 @@ impl Workspace {
     }
 
     /// Returns the default path for this workspace environment.
-    pub fn create_directory(
+    pub fn create_directory<E>(
         &self,
         profile_name: &str,
         original_env: &HashMap<String, Option<String>>,
-    ) -> io::Result<PathBuf> {
+        read_env: E,
+    ) -> io::Result<PathBuf>
+    where
+        E: Fn(&str) -> Result<String, VarError>,
+    {
         match self {
             Workspace::TmpDir => {
                 // Get effective user ID for name collision avoidance Use
@@ -236,7 +242,7 @@ impl Workspace {
 
                 let temp_dir = tempfile::Builder::new()
                     .prefix(&format!("island-tmp-{}-{}-", current_uid, profile_name))
-                    .tempdir_in(std::env::temp_dir())
+                    .tempdir_in(read_temp_dir(read_env))
                     .map_err(|e| {
                         std::io::Error::other(format!(
                             "Failed to create secure temporary directory: {}",
@@ -276,6 +282,23 @@ impl Workspace {
     }
 }
 
+// Copied from std::env::temp_dir() and adapted to not use env::var but read_env.
+fn read_temp_dir<E>(read_env: E) -> PathBuf
+where
+    E: Fn(&str) -> Result<String, VarError>,
+{
+    read_env("TMPDIR").map(PathBuf::from).unwrap_or_else(|_| {
+        #[cfg(target_os = "android")]
+        {
+            PathBuf::from("/data/local/tmp")
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            PathBuf::from("/tmp")
+        }
+    })
+}
+
 /// All supported workspace environment variables.
 const WORKSPACES: &[Workspace] = &[
     Workspace::Xdg(Xdg::ConfigHome),
@@ -289,16 +312,20 @@ const WORKSPACES: &[Workspace] = &[
 /// Manages workspace setup and configuration for a profile.
 #[derive(Default)]
 pub struct WorkspaceManager {
-    env_vars: BTreeMap<String, String>,
+    pub(crate) env_vars: BTreeMap<String, String>,
 }
 
 impl WorkspaceManager {
     /// Creates a workspace manager for the last resolved profile.
-    pub fn new(
+    pub fn new<E>(
         island_config: &IslandConfig,
         resolved_profiles: &[ResolvedProfile],
         verbose: &Verbose,
-    ) -> Result<Self, IslandError> {
+        read_env: E,
+    ) -> Result<Self, IslandError>
+    where
+        E: Fn(&str) -> Result<String, VarError>,
+    {
         let Some(last_profile) = resolved_profiles.last() else {
             return Ok(Default::default());
         };
@@ -312,7 +339,10 @@ impl WorkspaceManager {
         // Collect original workspace environment variables before any modifications.
         let original_env: HashMap<String, Option<String>> = WORKSPACES
             .iter()
-            .map(|env| (env.env_var().to_string(), std::env::var(env.env_var()).ok()))
+            .map(|env| {
+                let env_var = env.env_var();
+                (env_var.to_string(), read_env(env_var).ok())
+            })
             .collect();
 
         // Set up workspace directories for all workspace environment variables.
@@ -363,7 +393,7 @@ impl WorkspaceManager {
                 None => {
                     // Create a new directory for this workspace environment type.
                     let target_path =
-                        workspace.create_directory(last_profile.name, &original_env)?;
+                        workspace.create_directory(last_profile.name, &original_env, &read_env)?;
                     verbose.print(|| {
                         format!(
                             "Creating symlink {} -> {}",
@@ -416,25 +446,5 @@ impl WorkspaceManager {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_workspace_manager_empty() {
-        let verbose = Verbose(false);
-        let config = crate::config::tests::create_test_config_with_profiles(None);
-
-        let manager = WorkspaceManager::new(&config, &[], &verbose).unwrap();
-        assert!(manager.env_vars.is_empty());
-
-        let resolved_profile = crate::config::tests::create_resolved_profile("foo", None);
-        assert!(resolved_profile.workspace);
-
-        // TODO: Pass a closure to WorkspaceManager::new() for environment
-        // variables, and test with a resolved profile.
     }
 }

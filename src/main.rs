@@ -13,6 +13,8 @@ mod context;
 
 mod workspace;
 
+mod tests_profile;
+
 struct Verbose(bool);
 
 impl Verbose {
@@ -124,7 +126,9 @@ fn run(
     let mut env_vars = BTreeMap::default();
 
     let workspace_manager =
-        workspace::WorkspaceManager::new(island_config, &resolved_profiles, verbose)?;
+        workspace::WorkspaceManager::new(island_config, &resolved_profiles, verbose, |s| {
+            std::env::var(s)
+        })?;
 
     // Apply each profile's restrictions in order (broadest scope first).
     for resolved_profile in resolved_profiles {
@@ -179,7 +183,7 @@ fn main() -> Result<(), IslandError> {
 
     match cli.command {
         Commands::Run { profile, command } => {
-            let island_config = IslandConfig::new()?;
+            let island_config = IslandConfig::new(|s| std::env::var(s))?;
             let load_config = |name: &str| -> Result<ResolvedConfig, ConfigError> {
                 island_config
                     .load_landlock_config(name)

@@ -1,0 +1,12 @@
+abi = 6
+
+# Deny everything by default.
+[[ruleset]]
+handled_access_fs = ["abi.all"]
+handled_access_net = ["abi.all"]
+scoped = ["abi.all"]
+
+# Main system file hierarchies can be read and executed.
+[[path_beneath]]
+allowed_access = ["abi.read_execute"]
+parent = ["/bin", "/lib", "/usr", "/dev", "/etc"]

@@ -5,7 +5,7 @@ use landlockconfig::{Config, ConfigFormat, ParseDirectoryError, ResolveError, Re
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -147,9 +147,12 @@ impl IslandConfig {
     /// - landlock/: Contains Landlock configuration
     ///
     /// The profile name is derived from the directory name.
-    pub fn new() -> Result<Self, ConfigError> {
+    pub fn new<E>(read_env: E) -> Result<Self, ConfigError>
+    where
+        E: Fn(&str) -> Result<String, env::VarError>,
+    {
         let mut config = Self {
-            profiles_dir: Self::get_config_dir()?.join("profiles"),
+            profiles_dir: Self::config_dir(read_env)?.join("profiles"),
             ..Default::default()
         };
         let profiles_entries = fs::read_dir(&config.profiles_dir).map_err(|source| {
@@ -184,10 +187,13 @@ impl IslandConfig {
         Ok(config)
     }
 
-    fn get_config_dir() -> Result<PathBuf, ConfigError> {
-        let home_config = if let Ok(c) = std::env::var("XDG_CONFIG_HOME") {
+    fn config_dir<E>(read_env: E) -> Result<PathBuf, ConfigError>
+    where
+        E: Fn(&str) -> Result<String, env::VarError>,
+    {
+        let home_config = if let Ok(c) = read_env("XDG_CONFIG_HOME") {
             c.into()
-        } else if let Ok(h) = std::env::var("HOME") {
+        } else if let Ok(h) = read_env("HOME") {
             PathBuf::from(h).join(".config")
         } else {
             return Err(ConfigError::UnknownHomeConfig);
@@ -350,7 +356,7 @@ pub mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    pub fn create_test_config_with_profiles<I>(profiles_data: I) -> IslandConfig
+    fn create_test_config_with_profiles<I>(profiles_data: I) -> IslandConfig
     where
         I: IntoIterator<Item = (&'static str, &'static str)>,
     {
@@ -437,7 +443,7 @@ when_beneath = "/home/user/projects/work1"
         ));
     }
 
-    fn create_mock_resolved_config() -> ResolvedConfig {
+    pub fn create_mock_resolved_config() -> ResolvedConfig {
         let mini = r#"
 [[ruleset]]
 scoped = ["signal"]
@@ -962,7 +968,7 @@ literal = "/tmp/bar2"
     }
 
     #[test]
-    fn test_parse_config_xdg() {
+    fn test_parse_config_workspace() {
         let profiles_data = [
             (
                 "foo",
