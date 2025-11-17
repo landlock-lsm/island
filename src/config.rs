@@ -46,6 +46,7 @@ pub struct Env {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ResolvedProfile<'a> {
     pub name: &'a str,
+    pub profile: &'a Profile,
     pub context: Option<&'a ContextEntry>,
     pub config: ResolvedConfig,
     pub env_vars: &'a BTreeSet<Env>,
@@ -65,6 +66,7 @@ impl<'a> ResolvedProfile<'a> {
     {
         Ok(Self {
             name,
+            profile,
             context,
             config: load_config(name).map_err(|e| e.into())?,
             env_vars: &profile.env_vars,
@@ -674,11 +676,13 @@ when_beneath = "/foo"
     pub fn create_resolved_profile<'a>(
         name: &'a str,
         context: Option<&'a ContextEntry>,
+        profile: &'a Profile,
     ) -> ResolvedProfile<'a> {
         static EMPTY_BTREE_SET: BTreeSet<Env> = BTreeSet::new();
 
         ResolvedProfile {
             name,
+            profile,
             context,
             config: create_mock_resolved_config(),
             env_vars: &EMPTY_BTREE_SET,
@@ -689,17 +693,19 @@ when_beneath = "/foo"
     #[test]
     #[allow(clippy::nonminimal_bool)]
     fn test_resolved_profile_ordering() {
+        let source_profile = Profile::default();
+
         // Empty contexts.
         let ctx_beneath_none = Some(&ContextEntry { when_beneath: None });
-        let profile1 = create_resolved_profile("a", ctx_beneath_none);
-        let profile2 = create_resolved_profile("a", ctx_beneath_none);
+        let profile1 = create_resolved_profile("a", ctx_beneath_none, &source_profile);
+        let profile2 = create_resolved_profile("a", ctx_beneath_none, &source_profile);
         assert!(!(profile1 < profile2));
         assert!(profile1 == profile2);
         assert!(!(profile1 > profile2));
 
         // Fall back to lexicographic order.
-        let profile1 = create_resolved_profile("a", ctx_beneath_none);
-        let profile2 = create_resolved_profile("b", ctx_beneath_none);
+        let profile1 = create_resolved_profile("a", ctx_beneath_none, &source_profile);
+        let profile2 = create_resolved_profile("b", ctx_beneath_none, &source_profile);
         assert!(profile1 < profile2);
         assert!(!(profile1 == profile2));
         assert!(!(profile1 > profile2));
@@ -708,15 +714,15 @@ when_beneath = "/foo"
         let ctx_beneath_foo = Some(&ContextEntry {
             when_beneath: Some("/foo".into()),
         });
-        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("a", ctx_beneath_none);
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("a", ctx_beneath_none, &source_profile);
         assert!(!(profile1 < profile2));
         assert!(!(profile1 == profile2));
         assert!(profile1 > profile2);
 
         // Do not fall back to lexicographic order.
-        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("b", ctx_beneath_none);
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("b", ctx_beneath_none, &source_profile);
         assert!(!(profile1 < profile2));
         assert!(!(profile1 == profile2));
         assert!(profile1 > profile2);
@@ -725,15 +731,15 @@ when_beneath = "/foo"
         let ctx_beneath_bar = Some(&ContextEntry {
             when_beneath: Some("/bar".into()),
         });
-        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("a", ctx_beneath_bar);
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("a", ctx_beneath_bar, &source_profile);
         assert!(!(profile1 < profile2));
         assert!(!(profile1 == profile2));
         assert!(profile1 > profile2);
 
         // Do not fall back to lexicographic order.
-        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("b", ctx_beneath_bar);
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("b", ctx_beneath_bar, &source_profile);
         assert!(!(profile1 < profile2));
         assert!(!(profile1 == profile2));
         assert!(profile1 > profile2);
@@ -742,29 +748,29 @@ when_beneath = "/foo"
         let ctx_beneath_foo_bar = Some(&ContextEntry {
             when_beneath: Some("/foo/bar".into()),
         });
-        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("a", ctx_beneath_foo_bar);
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("a", ctx_beneath_foo_bar, &source_profile);
         assert!(profile1 < profile2);
         assert!(!(profile1 == profile2));
         assert!(!(profile1 > profile2));
 
         // Do not fall back to lexicographic order.
-        let profile1 = create_resolved_profile("b", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("a", ctx_beneath_foo_bar);
+        let profile1 = create_resolved_profile("b", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("a", ctx_beneath_foo_bar, &source_profile);
         assert!(profile1 < profile2);
         assert!(!(profile1 == profile2));
         assert!(!(profile1 > profile2));
 
         // Context with same path.
-        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("a", ctx_beneath_foo);
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
         assert!(!(profile1 < profile2));
         assert!(profile1 == profile2);
         assert!(!(profile1 > profile2));
 
         // Fall back to lexicographic order.
-        let profile1 = create_resolved_profile("a", ctx_beneath_foo);
-        let profile2 = create_resolved_profile("b", ctx_beneath_foo);
+        let profile1 = create_resolved_profile("a", ctx_beneath_foo, &source_profile);
+        let profile2 = create_resolved_profile("b", ctx_beneath_foo, &source_profile);
         assert!(profile1 < profile2);
         assert!(!(profile1 == profile2));
         assert!(!(profile1 > profile2));
@@ -772,6 +778,8 @@ when_beneath = "/foo"
 
     #[test]
     fn test_resolved_profile_sorted() {
+        let source_profile = Profile::default();
+
         let ctx_beneath_none = Some(&ContextEntry { when_beneath: None });
         let ctx_beneath_foo = Some(&ContextEntry {
             when_beneath: Some("/foo".into()),
@@ -784,14 +792,14 @@ when_beneath = "/foo"
         });
 
         let sorted = [
-            create_resolved_profile("a", ctx_beneath_none),
-            create_resolved_profile("b", ctx_beneath_none),
-            create_resolved_profile("a", ctx_beneath_bar),
-            create_resolved_profile("b", ctx_beneath_bar),
-            create_resolved_profile("a", ctx_beneath_foo),
-            create_resolved_profile("b", ctx_beneath_foo),
-            create_resolved_profile("a", ctx_beneath_foo_bar),
-            create_resolved_profile("b", ctx_beneath_foo_bar),
+            create_resolved_profile("a", ctx_beneath_none, &source_profile),
+            create_resolved_profile("b", ctx_beneath_none, &source_profile),
+            create_resolved_profile("a", ctx_beneath_bar, &source_profile),
+            create_resolved_profile("b", ctx_beneath_bar, &source_profile),
+            create_resolved_profile("a", ctx_beneath_foo, &source_profile),
+            create_resolved_profile("b", ctx_beneath_foo, &source_profile),
+            create_resolved_profile("a", ctx_beneath_foo_bar, &source_profile),
+            create_resolved_profile("b", ctx_beneath_foo_bar, &source_profile),
         ];
         // Create a BTreeSet from unsorted and duplicated profiles.
         let set: BTreeSet<_> = sorted.iter().rev().chain(sorted.iter()).collect();

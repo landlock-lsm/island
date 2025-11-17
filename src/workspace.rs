@@ -7,7 +7,7 @@
 //! prevent interference between sandboxed environments.
 
 use crate::{
-    config::{IslandConfig, ResolvedProfile},
+    config::{IslandConfig, Profile, ResolvedProfile},
     IslandError, Verbose,
 };
 use landlock::{path_beneath_rules, Access, AccessFs, RulesetCreatedAttr, ABI};
@@ -86,27 +86,27 @@ impl Xdg {
 
 /// Workspace directory types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Workspace {
+enum SymlinkWorkspace {
     /// XDG Base Directory specification directory
     Xdg(Xdg),
     /// Temporary directory
     TmpDir,
 }
 
-impl Workspace {
+impl SymlinkWorkspace {
     /// Returns the environment variable name for this workspace type.
     const fn env_var(&self) -> &'static str {
         match self {
-            Workspace::Xdg(xdg) => xdg.env_var(),
-            Workspace::TmpDir => "TMPDIR",
+            SymlinkWorkspace::Xdg(xdg) => xdg.env_var(),
+            SymlinkWorkspace::TmpDir => "TMPDIR",
         }
     }
 
     /// Returns the symlink name used in profile directories.
     const fn symlink_name(&self) -> &'static str {
         match self {
-            Workspace::Xdg(xdg) => xdg.symlink_name(),
-            Workspace::TmpDir => "workspace-tmp",
+            SymlinkWorkspace::Xdg(xdg) => xdg.symlink_name(),
+            SymlinkWorkspace::TmpDir => "workspace-tmp",
         }
     }
 
@@ -152,7 +152,7 @@ impl Workspace {
         // XXX: Should we really canonicalize?  This means that the directories
         // cannot be changed an runtime.
         let canonical_path = match self {
-            Workspace::TmpDir => {
+            SymlinkWorkspace::TmpDir => {
                 if path.is_symlink() {
                     // Get symlink metadata (not following the link).
                     let symlink_metadata = fs::symlink_metadata(path)?;
@@ -201,7 +201,7 @@ impl Workspace {
                     path.canonicalize()?
                 }
             }
-            Workspace::Xdg(_) => {
+            SymlinkWorkspace::Xdg(_) => {
                 // For XDG directories, just return the canonical path.
                 path.canonicalize()?
             }
@@ -233,7 +233,7 @@ impl Workspace {
         E: Fn(&str) -> Result<String, VarError>,
     {
         match self {
-            Workspace::TmpDir => {
+            SymlinkWorkspace::TmpDir => {
                 // Get effective user ID for name collision avoidance Use
                 // effective UID since that's what determines ownership of newly
                 // created files/directories and matches what tempfile will
@@ -251,7 +251,7 @@ impl Workspace {
                     })?;
                 Ok(temp_dir.keep())
             }
-            Workspace::Xdg(xdg) => {
+            SymlinkWorkspace::Xdg(xdg) => {
                 // Resolve XDG directory path with fallbacks.
                 let base_path = if let Some(env_value) =
                     original_env.get(xdg.env_var()).and_then(|opt| opt.as_ref())
@@ -300,14 +300,47 @@ where
 }
 
 /// All supported workspace environment variables.
-const WORKSPACES: &[Workspace] = &[
-    Workspace::Xdg(Xdg::ConfigHome),
-    Workspace::Xdg(Xdg::DataHome),
-    Workspace::Xdg(Xdg::StateHome),
-    Workspace::Xdg(Xdg::CacheHome),
-    Workspace::Xdg(Xdg::RuntimeDir),
-    Workspace::TmpDir,
+const SYMLINK_WORKSPACES: &[SymlinkWorkspace] = &[
+    SymlinkWorkspace::Xdg(Xdg::ConfigHome),
+    SymlinkWorkspace::Xdg(Xdg::DataHome),
+    SymlinkWorkspace::Xdg(Xdg::StateHome),
+    SymlinkWorkspace::Xdg(Xdg::CacheHome),
+    SymlinkWorkspace::Xdg(Xdg::RuntimeDir),
+    SymlinkWorkspace::TmpDir,
 ];
+
+enum AbsoluteWorkspace {
+    ContextBeneath { index: usize, path: PathBuf },
+}
+
+impl AbsoluteWorkspace {
+    fn new(profile: &Profile) -> Vec<Self> {
+        profile
+            .contexts
+            .iter()
+            .flat_map(|c| c.when_beneath.as_ref())
+            .enumerate()
+            .map(|(index, p)| Self::ContextBeneath {
+                index,
+                path: p.clone(),
+            })
+            .collect()
+    }
+
+    fn env_var(&self) -> String {
+        match self {
+            AbsoluteWorkspace::ContextBeneath { index, .. } => {
+                format!("ISLAND_CONTEXT_BENEATH_{}", index)
+            }
+        }
+    }
+
+    const fn target_path(&self) -> &PathBuf {
+        match self {
+            AbsoluteWorkspace::ContextBeneath { path, .. } => path,
+        }
+    }
+}
 
 /// Manages workspace setup and configuration for a profile.
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -332,7 +365,7 @@ impl WorkspaceManager {
         let profile_dir = island_config.profile_dir(resolved_profile.name);
 
         // Collect original workspace environment variables before any modifications.
-        let original_env: HashMap<String, Option<String>> = WORKSPACES
+        let symlink_original_env: HashMap<String, Option<String>> = SYMLINK_WORKSPACES
             .iter()
             .map(|env| {
                 let env_var = env.env_var();
@@ -343,7 +376,7 @@ impl WorkspaceManager {
         // Set up workspace directories for all workspace environment variables.
         let mut env_vars: BTreeMap<String, String> = BTreeMap::new();
 
-        for workspace in WORKSPACES {
+        for workspace in SYMLINK_WORKSPACES {
             let env_var = workspace.env_var();
             let symlink_path = profile_dir.join(workspace.symlink_name());
 
@@ -389,7 +422,7 @@ impl WorkspaceManager {
                     // Create a new directory for this workspace environment type.
                     let target_path = workspace.create_directory(
                         resolved_profile.name,
-                        &original_env,
+                        &symlink_original_env,
                         &read_env,
                     )?;
                     verbose.print(|| {
@@ -403,6 +436,17 @@ impl WorkspaceManager {
                     target_path
                 }
             };
+
+            env_vars.insert(
+                env_var.to_string(),
+                target_path.to_string_lossy().to_string(),
+            );
+            verbose.print(|| format!("Set {}={}", env_var, target_path.display()));
+        }
+
+        for workspace in AbsoluteWorkspace::new(resolved_profile.profile) {
+            let env_var = workspace.env_var();
+            let target_path = workspace.target_path();
 
             env_vars.insert(
                 env_var.to_string(),

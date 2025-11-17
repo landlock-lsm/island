@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use crate::{
-    config::{tests::create_resolved_profile, ConfigError, IslandConfig},
+    config::{tests::create_resolved_profile, ConfigError, IslandConfig, Profile},
     context::ContextEntry,
     Verbose,
 };
@@ -100,11 +100,13 @@ fn test_profile_mini() {
 
 #[test]
 fn test_workspace_manager_empty() {
+    let source_profile = Profile::default();
+
     let verbose = Verbose(true);
     let read_env = get_read_env("no-landlock-config");
     let config = IslandConfig::new(&read_env).unwrap();
 
-    let resolved_profile = create_resolved_profile("foo", None);
+    let resolved_profile = create_resolved_profile("foo", None, &source_profile);
     assert!(resolved_profile.workspace);
 
     let manager = resolved_profile
@@ -112,7 +114,7 @@ fn test_workspace_manager_empty() {
         .unwrap();
     assert!(!manager.env_vars.is_empty());
 
-    let mut resolved_profile = create_resolved_profile("bar", None);
+    let mut resolved_profile = create_resolved_profile("bar", None, &source_profile);
     resolved_profile.workspace = false;
     let manager = resolved_profile
         .workspace_manager(&config, &verbose, &read_env)
