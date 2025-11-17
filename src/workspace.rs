@@ -310,31 +310,26 @@ const WORKSPACES: &[Workspace] = &[
 ];
 
 /// Manages workspace setup and configuration for a profile.
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub struct WorkspaceManager {
     pub(crate) env_vars: BTreeMap<String, String>,
 }
 
 impl WorkspaceManager {
-    /// Creates a workspace manager for the last resolved profile.
     pub fn new<E>(
+        resolved_profile: &ResolvedProfile,
         island_config: &IslandConfig,
-        resolved_profiles: &[ResolvedProfile],
         verbose: &Verbose,
         read_env: E,
     ) -> Result<Self, IslandError>
     where
         E: Fn(&str) -> Result<String, VarError>,
     {
-        let Some(last_profile) = resolved_profiles.last() else {
-            return Ok(Default::default());
-        };
-
-        if !last_profile.workspace {
+        if !resolved_profile.workspace {
             return Ok(Default::default());
         }
 
-        let profile_dir = island_config.profile_dir(last_profile.name);
+        let profile_dir = island_config.profile_dir(resolved_profile.name);
 
         // Collect original workspace environment variables before any modifications.
         let original_env: HashMap<String, Option<String>> = WORKSPACES
@@ -392,8 +387,11 @@ impl WorkspaceManager {
                 Some(path) => path,
                 None => {
                     // Create a new directory for this workspace environment type.
-                    let target_path =
-                        workspace.create_directory(last_profile.name, &original_env, &read_env)?;
+                    let target_path = workspace.create_directory(
+                        resolved_profile.name,
+                        &original_env,
+                        &read_env,
+                    )?;
                     verbose.print(|| {
                         format!(
                             "Creating symlink {} -> {}",

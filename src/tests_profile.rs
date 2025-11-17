@@ -5,7 +5,6 @@
 use crate::{
     config::{tests::create_resolved_profile, ConfigError, IslandConfig},
     context::ContextEntry,
-    workspace::WorkspaceManager,
     Verbose,
 };
 use landlockconfig::ResolvedConfig;
@@ -104,17 +103,19 @@ fn test_workspace_manager_empty() {
     let verbose = Verbose(true);
     let read_env = get_read_env("no-landlock-config");
     let config = IslandConfig::new(&read_env).unwrap();
-    let manager = WorkspaceManager::new(&config, &[], &verbose, &read_env).unwrap();
-    assert!(manager.env_vars.is_empty());
 
     let resolved_profile = create_resolved_profile("foo", None);
     assert!(resolved_profile.workspace);
 
-    let manager = WorkspaceManager::new(&config, &[resolved_profile], &verbose, &read_env).unwrap();
+    let manager = resolved_profile
+        .workspace_manager(&config, &verbose, &read_env)
+        .unwrap();
     assert!(!manager.env_vars.is_empty());
 
     let mut resolved_profile = create_resolved_profile("bar", None);
     resolved_profile.workspace = false;
-    let manager = WorkspaceManager::new(&config, &[resolved_profile], &verbose, &read_env).unwrap();
+    let manager = resolved_profile
+        .workspace_manager(&config, &verbose, &read_env)
+        .unwrap();
     assert!(manager.env_vars.is_empty());
 }

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::context::{ContextEntry, ContextSet};
+use crate::{
+    context::{ContextEntry, ContextSet},
+    workspace::WorkspaceManager,
+    IslandError, Verbose,
+};
 use landlockconfig::{Config, ConfigFormat, ParseDirectoryError, ResolveError, ResolvedConfig};
 use serde::Deserialize;
 use std::{
@@ -66,6 +70,18 @@ impl<'a> ResolvedProfile<'a> {
             env_vars: &profile.env_vars,
             workspace: profile.workspace,
         })
+    }
+
+    pub fn workspace_manager<E>(
+        &'a self,
+        island_config: &'a IslandConfig,
+        verbose: &Verbose,
+        read_env: E,
+    ) -> Result<WorkspaceManager, IslandError>
+    where
+        E: Fn(&str) -> Result<String, env::VarError>,
+    {
+        WorkspaceManager::new(self, island_config, verbose, read_env)
     }
 }
 

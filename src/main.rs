@@ -3,7 +3,9 @@
 use clap::{Parser, Subcommand};
 use landlock::RulesetError;
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
-use std::{collections::BTreeMap, fmt::Display, os::unix::process::CommandExt, process::Command};
+use std::{
+    collections::BTreeMap, env, fmt::Display, io, os::unix::process::CommandExt, process::Command,
+};
 use thiserror::Error;
 
 mod config;
@@ -125,10 +127,17 @@ fn run(
 
     let mut env_vars = BTreeMap::default();
 
+    let Some(last_profile) = resolved_profiles.last() else {
+        // This should never happen because there is at least one resolved
+        // profile returned by resolve_profiles_by_names() or
+        // resolve_profiles_by_path().
+        Err(IslandError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "No profile provided",
+        )))?
+    };
     let workspace_manager =
-        workspace::WorkspaceManager::new(island_config, &resolved_profiles, verbose, |s| {
-            std::env::var(s)
-        })?;
+        last_profile.workspace_manager(island_config, verbose, |s| env::var(s))?;
 
     // Apply each profile's restrictions in order (broadest scope first).
     for resolved_profile in resolved_profiles {
