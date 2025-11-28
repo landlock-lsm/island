@@ -407,12 +407,20 @@ impl WorkspaceManager {
                         );
 
                         // Remove the insecure , we'll create a new temp directory below.
-                        verbose.print(|| format!("Removing symlink: {}", symlink_path.display()));
+                        verbose.print(|| {
+                            format!("Removing insecure symlink: {}", symlink_path.display())
+                        });
                         fs::remove_file(&symlink_path)?;
                         None
                     }
                 }
             } else {
+                if symlink_path.is_symlink() {
+                    // The target is missing.
+                    verbose
+                        .print(|| format!("Removing outdated symlink: {}", symlink_path.display()));
+                    fs::remove_file(&symlink_path)?;
+                }
                 None
             };
 
