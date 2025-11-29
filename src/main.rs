@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use landlock::RulesetError;
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
 use std::{
@@ -31,6 +31,11 @@ impl Verbose {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum Shell {
+    Zsh,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     #[command(
@@ -51,6 +56,12 @@ enum Commands {
         profile: Vec<String>,
 
         #[arg(
+            long,
+            help = "Execute command without sandboxing if no profile is found"
+        )]
+        ignore_missing_profile: bool,
+
+        #[arg(
             trailing_var_arg = true,
             required = true,
             num_args = 1..,
@@ -60,6 +71,27 @@ enum Commands {
                 own options."
         )]
         command: Vec<String>,
+    },
+
+    #[command(
+        about = "Show the profiles that apply to the current context",
+        long_about = "Check and list the profiles that would be applied if 'island run' \
+            was executed in the current directory. Returns exit code 0 if profiles are found, \
+            1 otherwise."
+    )]
+    Status,
+
+    #[command(
+        about = "Print shell integration script",
+        long_about = "Output a shell script that can be sourced to integrate island with your shell. \
+            Currently supports Zsh."
+    )]
+    Hook {
+        #[arg(help = "Shell to generate integration for (currently only Zsh is supported)")]
+        shell: Shell,
+
+        #[arg(long, help = "Output the script to remove the shell integration")]
+        undo: bool,
     },
     // TODO: Add profile management subcommands (list, show, create)
 }
@@ -111,6 +143,7 @@ fn run(
     resolved_profiles: Vec<ResolvedProfile<'_>>,
     island_config: &IslandConfig,
     command_args: &[String],
+    ignore_missing_profile: bool,
     verbose: &Verbose,
 ) -> Result<(), IslandError> {
     verbose.print(|| {
@@ -128,6 +161,15 @@ fn run(
     let mut env_vars = BTreeMap::default();
 
     let Some(last_profile) = resolved_profiles.last() else {
+        if ignore_missing_profile {
+            verbose.print(|| "No profile found, executing without sandbox".to_string());
+            Err(IslandError::Io(
+                Command::new(&command_args[0])
+                    .args(&command_args[1..])
+                    .exec(),
+            ))?
+        }
+
         // This should never happen because there is at least one resolved
         // profile returned by resolve_profiles_by_names() or
         // resolve_profiles_by_path().
@@ -136,6 +178,7 @@ fn run(
             "No profile provided",
         )))?
     };
+
     let workspace_manager =
         last_profile.workspace_manager(island_config, verbose, |s| env::var(s))?;
 
@@ -186,33 +229,78 @@ fn run(
     ))
 }
 
+fn resolve_profiles<'a>(
+    island_config: &'a IslandConfig,
+    profile_names: &[String],
+    verbose: &Verbose,
+) -> Result<Vec<ResolvedProfile<'a>>, IslandError> {
+    let load_config = |name: &str| -> Result<ResolvedConfig, ConfigError> {
+        island_config
+            .load_landlock_config(name)
+            .map_err(|e| e.into())
+    };
+
+    if !profile_names.is_empty() {
+        // Use explicit profiles, without context inference.
+        verbose.print(|| format!("Using explicit profiles: {:?}", profile_names));
+        Ok(island_config.resolve_profiles_by_names(profile_names, load_config)?)
+    } else {
+        // Use automatic profile resolution based on context.
+        let canonicalized_cwd = std::env::current_dir()?.canonicalize()?;
+        Ok(island_config
+            .resolve_profiles_by_path(canonicalized_cwd, load_config)?
+            .into_iter()
+            .collect())
+    }
+}
+
 fn main() -> Result<(), IslandError> {
     let cli = Cli::parse();
     let verbose = Verbose(cli.verbose);
 
     match cli.command {
-        Commands::Run { profile, command } => {
+        Commands::Run {
+            profile,
+            command,
+            ignore_missing_profile,
+        } => {
             let island_config = IslandConfig::new(|s| std::env::var(s))?;
-            let load_config = |name: &str| -> Result<ResolvedConfig, ConfigError> {
-                island_config
-                    .load_landlock_config(name)
-                    .map_err(|e| e.into())
-            };
+            let resolved_profiles = resolve_profiles(&island_config, &profile, &verbose)?;
 
-            let resolved_profiles = if !profile.is_empty() {
-                // Use explicit profiles, without context inference.
-                verbose.print(|| format!("Using explicit profiles: {:?}", profile));
-                island_config.resolve_profiles_by_names(&profile, load_config)?
-            } else {
-                // Use automatic profile resolution based on context.
-                let canonicalized_cwd = std::env::current_dir()?.canonicalize()?;
-                island_config
-                    .resolve_profiles_by_path(canonicalized_cwd, load_config)?
-                    .into_iter()
-                    .collect()
-            };
+            run(
+                resolved_profiles,
+                &island_config,
+                &command,
+                ignore_missing_profile,
+                &verbose,
+            )
+        }
+        Commands::Status => {
+            let island_config = IslandConfig::new(|s| std::env::var(s))?;
+            let resolved_profiles = resolve_profiles(&island_config, &[], &verbose)?;
 
-            run(resolved_profiles, &island_config, &command, &verbose)
+            if resolved_profiles.is_empty() {
+                Err(IslandError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "No profile found for the current directory",
+                )))?
+            }
+
+            let names: Vec<&str> = resolved_profiles.iter().map(|p| p.name).collect();
+            println!("{}", names.join("\n"));
+            Ok(())
+        }
+        Commands::Hook { shell, undo } => {
+            match shell {
+                Shell::Zsh => {
+                    if undo {
+                        println!("_island_unhook 2>/dev/null || :");
+                    } else {
+                        println!("{}", include_str!("../assets/shell/hook.zsh"));
+                    }
+                }
+            }
+            Ok(())
         }
     }
 }

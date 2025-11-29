@@ -16,6 +16,7 @@ Developed alongside the kernel feature and its Rust libraries, it bridges the ga
 - Declarative policies: Uses TOML profiles instead of code-based rules.
 - Context-aware activation: Automatically applies security profiles based on your current working directory.
 - Full environment isolation: Manages isolated workspaces (XDG directories, `TMPDIR`) in addition to access control.
+- Transparent shell integration: Automatically sandboxes commands in your shell without changing your workflow.
 
 By tying security policies to locations rather than just applications, Island enables natural, invisible sandboxing where `cd project && island run -- command` just works.
 
@@ -65,6 +66,8 @@ island -v run vim README.md
 island run -p customer-a firefox
 island run -p personal firefox
 ```
+
+We can avoid to always prefix commands with `island run` thanks to the [shell integration](#shell-integration).
 
 ### Best practice
 
@@ -158,6 +161,68 @@ See the [Landlock Config documentation](https://github.com/landlock-lsm/landlock
 - Complete environment isolation: XDG-compliant workspace separation for configurations, data, and state. Each profile gets separate temporary and XDG directories.
 - Workspace validation: Prevents symlink attacks through path canonicalization and file ownership checks.
 
+## Shell integration
+
+Island provides a shell integration script to transparently sandbox commands.
+The goal is to seamlessly integrate sandboxing into user workflow.
+This integration is a convenience feature that users control: they choose which directories are sandboxed, and they can always step out of the sandbox by changing directories or disabling the hook (with `_island_unhook`).
+
+Most types of commands are handled (e.g., relative or absolute executables, aliases), but shell functions and `eval` commands are not.
+
+### Setup
+
+For Zsh, add the following to your `~/.zshrc`:
+
+```sh
+source <(island hook zsh)
+```
+
+Alternatively, you can run this command to append it automatically:
+
+```sh
+echo 'source <(island hook zsh)' >> ~/.zshrc
+```
+
+This intercepts command execution.
+If the current directory matches an Island profile, the command is automatically executed via `island run`.
+
+You can check if the launched command are sandboxed with Island by looking at the XDG paths:
+
+```sh
+env | grep XDG_
+```
+
+### Prompt
+
+You can display the active Island status in your prompt using the `$_ISLAND_PROFILES` array variable.
+
+```sh
+setopt PROMPT_SUBST
+PROMPT='%~ %B%F{yellow}${_ISLAND_PROFILES:+▣ }%f%b%# '
+```
+
+### Undo
+
+To remove the shell integration for the current session:
+
+```sh
+source <(island hook --undo zsh)
+```
+
+### Example with shell integration
+
+```console
+$ source <(island hook zsh)
+
+# With shell integration enabled, commands are automatically sandboxed based on
+# context, so there is no need to prefix commands with island run:
+$ cd ~/work/customer-a/project-foo
+$ file img.jpg
+
+$ env | grep XDG_CONFIG_HOME
+XDG_CONFIG_HOME=/home/user/.config/island-config-profiles/customer-a
+```
+
 ## Installation
 
 Currently, Island must be built from source:
@@ -199,7 +264,6 @@ Current limitations:
 ## TODO
 
 - Command auto-completion: Shell completion support for profiles and commands.
-- Shell integration: Integrate into shell pre-exec hook for transparent operation.
 - Configuration validation: Deny unknown config properties with helpful error messages.
 - Landlock variables: Add support for `landlock_variables` extension in `[[env]]` entries.
 - Default profiles: Auto-create working profiles by parsing PATH and adding common directory access when no config exists.
