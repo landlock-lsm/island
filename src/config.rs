@@ -9,7 +9,9 @@ use landlockconfig::{Config, ConfigFormat, ParseDirectoryError, ResolveError, Re
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -149,6 +151,39 @@ pub struct Profile {
     pub workspace: bool,
 }
 
+// Profile names should be trusted, but let's enforce some basic sanity checks
+// to avoid usability issues.
+pub fn is_profile_name_valid<S>(name: S) -> bool
+where
+    S: AsRef<OsStr>,
+{
+    let name = name.as_ref();
+
+    // Check for path separators and directory traversal.
+    if Path::new(name).file_name().is_none_or(|n| n != name) {
+        return false;
+    }
+
+    let name_str = name.to_string_lossy();
+
+    // Prevent leading dots (hidden), dashes (CLI flags), and path expansion.
+    if name_str.starts_with('.') || name_str.starts_with('-') || name_str.starts_with('~') {
+        return false;
+    }
+
+    // Prevent leading and trailing whitespace.
+    if name_str.chars().next().is_some_and(char::is_whitespace)
+        || name_str.chars().last().is_some_and(char::is_whitespace)
+    {
+        return false;
+    }
+
+    // Check for common CLI special characters.
+    name_str.chars().all(|c| {
+        c != '$' && c != '*' && c != '|' && c != '&' && c != ';' && c != '<' && c != '>' && c != '`'
+    })
+}
+
 type Profiles = BTreeMap<String, Profile>;
 
 #[derive(Debug, Default)]
@@ -182,8 +217,12 @@ impl IslandConfig {
 
         for entry in profiles_entries {
             let entry = entry?;
+            let file_name = entry.file_name();
+            if !is_profile_name_valid(&file_name) {
+                continue;
+            }
             if entry.file_type()?.is_dir() {
-                let profile_name = entry.file_name().to_string_lossy().to_string();
+                let profile_name = file_name.to_string_lossy().to_string();
                 let island_toml_path = entry.path().join("profile.toml");
 
                 if island_toml_path.exists() {
@@ -205,7 +244,7 @@ impl IslandConfig {
         Ok(config)
     }
 
-    fn config_dir<E>(read_env: E) -> Result<PathBuf, ConfigError>
+    pub fn config_dir<E>(read_env: E) -> Result<PathBuf, ConfigError>
     where
         E: Fn(&str) -> Result<String, env::VarError>,
     {
@@ -1047,5 +1086,40 @@ workspace = false
         ));
 
         assert_eq!(profile_iter.next(), None);
+    }
+
+    #[test]
+    fn test_is_profile_name_valid() {
+        assert!(is_profile_name_valid("foo"));
+        assert!(is_profile_name_valid("foo-bar"));
+        assert!(is_profile_name_valid("foo_bar"));
+        assert!(is_profile_name_valid("foo.bar"));
+        assert!(is_profile_name_valid("foo bar"));
+        assert!(is_profile_name_valid("foo@bar"));
+        assert!(is_profile_name_valid("foo+bar"));
+
+        assert!(!is_profile_name_valid("."));
+        assert!(!is_profile_name_valid(".."));
+        assert!(!is_profile_name_valid(".hidden"));
+        assert!(!is_profile_name_valid("-flag"));
+        assert!(!is_profile_name_valid("foo/bar"));
+        assert!(!is_profile_name_valid("/foo"));
+        assert!(!is_profile_name_valid("foo/"));
+        assert!(!is_profile_name_valid("~foo"));
+        assert!(!is_profile_name_valid(""));
+        assert!(!is_profile_name_valid(" "));
+        assert!(!is_profile_name_valid(" foo"));
+        assert!(!is_profile_name_valid("\tfoo"));
+        assert!(!is_profile_name_valid("foo "));
+        assert!(!is_profile_name_valid("foo\t"));
+        assert!(!is_profile_name_valid("\n"));
+        assert!(!is_profile_name_valid("foo$bar"));
+        assert!(!is_profile_name_valid("foo*bar"));
+        assert!(!is_profile_name_valid("foo|bar"));
+        assert!(!is_profile_name_valid("foo&bar"));
+        assert!(!is_profile_name_valid("foo;bar"));
+        assert!(!is_profile_name_valid("foo<bar"));
+        assert!(!is_profile_name_valid("foo>bar"));
+        assert!(!is_profile_name_valid("foo`bar"));
     }
 }

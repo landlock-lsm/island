@@ -4,12 +4,18 @@ use clap::{Parser, Subcommand, ValueEnum};
 use landlock::RulesetError;
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
 use std::{
-    collections::BTreeMap, env, fmt::Display, io, os::unix::process::CommandExt, process::Command,
+    collections::BTreeMap,
+    env,
+    fmt::Display,
+    fs, io,
+    os::unix::process::CommandExt,
+    path::{self, Path, PathBuf},
+    process::Command,
 };
 use thiserror::Error;
 
 mod config;
-use config::{ConfigError, IslandConfig, ResolvedProfile};
+use config::{is_profile_name_valid, ConfigError, IslandConfig, ResolvedProfile};
 
 mod context;
 
@@ -93,7 +99,26 @@ enum Commands {
         #[arg(long, help = "Output the script to remove the shell integration")]
         undo: bool,
     },
-    // TODO: Add profile management subcommands (list, show, create)
+
+    #[command(
+        about = "Create a new profile",
+        long_about = "Create a new profile with a default Landlock configuration."
+    )]
+    Create {
+        #[arg(help = "Name of the new profile")]
+        name: String,
+
+        #[arg(
+            short = 'b',
+            long,
+            default_value = ".",
+            help = "Directory where the profile applies",
+            long_help = "One or more directories where this profile should be automatically activated. \
+                These paths will be converted to absolute paths and stored in the profile configuration."
+        )]
+        when_beneath: Vec<String>,
+    },
+    // TODO: Add profile management subcommands (list, show)
 }
 
 #[derive(Parser)]
@@ -231,6 +256,14 @@ fn run(
     ))
 }
 
+// From rustc_fs_util.
+fn try_canonicalize<P>(path: P) -> io::Result<PathBuf>
+where
+    P: AsRef<Path>,
+{
+    fs::canonicalize(&path).or_else(|_| path::absolute(&path))
+}
+
 fn resolve_profiles<'a>(
     island_config: &'a IslandConfig,
     profile_names: &[String],
@@ -301,6 +334,56 @@ fn main() -> Result<(), IslandError> {
                         println!("{}", include_str!("../assets/shell/hook.zsh"));
                     }
                 }
+            }
+            Ok(())
+        }
+        Commands::Create {
+            name,
+            when_beneath: paths,
+        } => {
+            if !is_profile_name_valid(&name) {
+                return Err(IslandError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid profile name \"{}\"", name),
+                )));
+            }
+
+            let config_dir = IslandConfig::config_dir(|s| std::env::var(s))?;
+            let profile_dir = config_dir.join("profiles").join(&name);
+            let landlock_dir = profile_dir.join("landlock");
+
+            if profile_dir.exists() {
+                Err(IslandError::Io(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("Profile \"{}\" already exists", name),
+                )))?
+            }
+
+            std::fs::create_dir_all(&landlock_dir)?;
+
+            let mut full_paths = Vec::new();
+            let profile_content = paths
+                .iter()
+                .map(|path| {
+                    let full_path = try_canonicalize(path)?;
+                    let path_value = toml::Value::String(full_path.to_string_lossy().into());
+                    full_paths.push(full_path);
+                    Ok(format!("[[context]]\nwhen_beneath = {}", path_value))
+                })
+                .collect::<Result<Vec<_>, io::Error>>()?
+                .join("\n\n")
+                + "\n";
+            std::fs::write(profile_dir.join("profile.toml"), profile_content)?;
+
+            std::fs::write(
+                landlock_dir.join("island-default-base.toml"),
+                include_str!("../assets/landlock/island-default-base.toml"),
+            )?;
+
+            println!("Created profile \"{}\" in {}", name, profile_dir.display());
+            println!("It applies to:");
+            for path in full_paths {
+                println!("- {}", path.display());
             }
             Ok(())
         }

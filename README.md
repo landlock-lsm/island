@@ -20,6 +20,38 @@ Developed alongside the kernel feature and its Rust libraries, it bridges the ga
 
 By tying security policies to locations rather than just applications, Island enables natural, invisible sandboxing where `cd project && island run -- command` just works.
 
+## TL;DR
+
+In a Zsh shell:
+
+```console
+# Setup Island:
+$ git clone https://github.com/landlock-lsm/island
+$ cd island
+$ cargo install --path .
+$ export PATH="$PATH:$HOME/.cargo/bin"
+$ rehash
+$ source <(island hook zsh)
+
+# Create a profile for your project:
+$ cd ~/my-project
+$ island create my-project
+Created profile "my-project" in /home/user/.config/island/profiles/my-project
+It applies to:
+- /home/user/my-project
+
+# Automatically run all commands launched under ~/my-project in a sandbox!
+$ ls
+foo.txt bar.jpg
+$ ls /
+ls: cannot open directory '/': Permission denied
+
+# Leaving the project directory automatically deactivates the sandbox:
+$ cd /
+$ ls
+bin  boot  dev	etc  home  [...]
+```
+
 ## How it works
 
 Profiles are stored in `~/.config/island/profiles/<name>/` and contain:
@@ -51,6 +83,26 @@ Execution process:
 3. Environment configuration: Apply profile variables and context paths.
 4. Security setup: Load Landlock policies and create nested restrictions.
 5. Command execution: Run target program in the secured environment.
+
+### Creating a profile
+
+You can easily create a new profile using the `create` command.
+This will generate the profile directory structure and a default Landlock configuration.
+
+```sh
+# Create a profile named "customer-a" that activates when in the current directory:
+cd ~/work/customer-a
+island create customer-a
+
+# Or specify the path explicitly:
+island create customer-b --when-beneath ~/work/customer-b
+```
+
+This command creates the directory `~/.config/island/profiles/customer-a` with:
+- `profile.toml`: Configured with the specified path context (or current directory).
+- `landlock/island-default-base.toml`: A default restrictive policy.
+
+You should then copy `island-default-base.toml` to a new file in the same directory and updated it with custom rules.
 
 ### Example of activity-based isolation
 
@@ -278,7 +330,7 @@ Current limitations:
 - Configuration validation: Deny unknown config properties with helpful error messages.
 - Landlock variables: Add support for `landlock_variables` extension in `[[env]]` entries.
 - Default profiles: Auto-create working profiles by parsing PATH and adding common directory access when no config exists.
-- Profile management: Add a `create-profile <name>` command with default templates.
+- Profile management: Check if default Landlock configurations should be updated (and warn about symlinks).
 - Synthetic chained ruleset: Implement custom nesting to avoid 16-level Landlock kernel limit.
 - Testing: Add CI and comprehensive tests for profile inference, environment variable precedence, and workspace isolation.
 - Improved error messages: Better diagnostics for profile resolution failures and Landlock errors.
