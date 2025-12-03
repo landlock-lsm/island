@@ -14,7 +14,7 @@ Developed alongside the kernel feature and its Rust libraries, it bridges the ga
 
 - Zero-code integration: Runs existing binaries without modification.
 - Declarative policies: Uses TOML profiles instead of code-based rules.
-- Context-aware activation: Automatically applies security profiles based on your current working directory.
+- Context-aware activation: Automatically applies security profiles based on your **current working directory**.
 - Full environment isolation: Manages isolated workspaces (XDG directories, `TMPDIR`) in addition to access control.
 - Transparent shell integration: Automatically sandboxes commands in your shell without changing your workflow.
 
@@ -77,18 +77,18 @@ For proper isolation, files should be organized in dedicated directory hierarchi
 
 ```
 ~/.config/island/profiles/
-├── project-a
+├── customer-a
 │   ├── profile.toml
 │   ├── landlock
 │   │   ├── base.toml
 │   │   └── home-config-ro.toml
-│   ├── workspace-cache -> /home/user/.cache/island-cache-profiles/project-a
-│   ├── workspace-config -> /home/user/.config/island-config-profiles/project-a
-│   ├── workspace-data -> /home/user/.local/share/island-data-profiles/project-a
-│   ├── workspace-run -> /run/user/1000/island-run-profiles/project-a
-│   ├── workspace-state -> /home/user/.local/state/island-state-profiles/project-a
-│   └── workspace-tmp -> /tmp/island-tmp-1000-project-a-gMiVQK
-└── work-project
+│   ├── workspace-cache -> /home/user/.cache/island-cache-profiles/customer-a
+│   ├── workspace-config -> /home/user/.config/island-config-profiles/customer-a
+│   ├── workspace-data -> /home/user/.local/share/island-data-profiles/customer-a
+│   ├── workspace-run -> /run/user/1000/island-run-profiles/customer-a
+│   ├── workspace-state -> /home/user/.local/state/island-state-profiles/customer-a
+│   └── workspace-tmp -> /tmp/island-tmp-1000-customer-a-gMiVQK
+└── personal
     ├── profile.toml
     ├── landlock
     │   └── strict.toml
@@ -119,7 +119,9 @@ name = "CUSTOMER_NAME"
 literal = "The A-Team"
 ```
 
-This profile automatically activates when you work in the `/home/user/work/customer-a/` directory, providing customer-specific configurations and isolated application state.
+Workspaces are useful to easily isolate sandboxes, but they can be disabled by inserting `workspace = false` at the top of the `profile.toml` file.
+
+This profile automatically activates when you work in the `/home/user/work/customer-a` directory, providing customer-specific configurations and isolated application state.
 
 Example Landlock configuration (`landlock/base.toml`):
 ```toml
@@ -192,6 +194,12 @@ You can check if the launched command are sandboxed with Island by looking at th
 env | grep XDG_
 ```
 
+You can bypass the sandbox for a single command by prefixing it with `nosandbox`:
+
+```sh
+nosandbox ls /
+```
+
 ### Prompt
 
 You can display the active Island status in your prompt using the `$_ISLAND_PROFILES` array variable.
@@ -233,9 +241,12 @@ cd island
 cargo run -- run -h
 ```
 
-It can be installed for the current user with:
+It can be installed in `~/.cargo/bin` with:
+
 ```sh
 cargo install --path .
+export PATH="$PATH:$HOME/.cargo/bin"
+# Call `rehash` with Zsh.
 ```
 
 ## Requirements
@@ -255,11 +266,11 @@ Island is **not** designed to protect against (non-exhaustive list):
 - Resource exhaustion attacks (CPU, memory, disk space).
 
 Current limitations:
-- TTY-based sandbox escapes: Inherits the current TTY file descriptor, which can be used to escape the sandbox. We are working on a TTY proxy.
 - Outside interactions: Connecting to services outside the sandbox (e.g., D-Bus, Wayland) that could be used to escape the sandbox. This should be mitigated by limiting access to the related sockets or implementing proxies.
+- TTY-based sandbox bypass: Since Linux 6.2, the TIOCSTI IOCTL should be restricted (see `dev.tty.legacy_tiocsti` sysctl), and we are working on a TTY proxy.
 - Nested sandboxing: Currently limited by kernel's 16-level Landlock nesting. This will be addressed with synthetic Landlock ruleset chaining.
 - No environment filtering: No filtering of environment variables that might contain denied paths. We should parse and update common variables (e.g., `PATH`, `XDG_DATA_DIRS`, `OLDPWD`) according to the Landlock configuration.
-- Profile directory exposure: If Island's own XDG directories are accessible to sandboxed processes, configuration could be modified. We should warn about such configuration issue.
+- Profile directory exposure: If Island's own XDG directories are accessible to sandboxed processes, configuration could be modified. We should warn about such configuration issues.
 
 ## TODO
 
@@ -272,7 +283,65 @@ Current limitations:
 - Testing: Add CI and comprehensive tests for profile inference, environment variable precedence, and workspace isolation.
 - Improved error messages: Better diagnostics for profile resolution failures and Landlock errors.
 - Advanced profile management: List, show, and edit profiles via CLI.
+- Log denied requests (with audit).
+- Improve error messages.
 
 ## Contributing
 
 Island is part of the [Landlock project](https://landlock.io). Contributions are welcome!
+
+## FAQ
+
+### Troubleshooting
+
+**Q: `island run firefox` returns an error. What should I do?**
+
+A: First, ensure a profile exists that defines the sandbox and allows execution of the program (e.g., access to `/usr`). Second, if no profile is explicitly specified, Island infers it from the current working directory, so ensure the `when_beneath` configuration matches your location.
+
+**Q: How do I debug Island issues?**
+
+A: Use the `--verbose` option to see detailed logs.
+
+**Q: Why are non-existent paths ignored with just a warning?**
+
+A: If a path doesn't exist, it poses no security risk since it cannot be accessed. However, the warning indicates a potential configuration issue that should be addressed.
+
+**Q: I want to run a command without automatic sandboxing. How do I do that?**
+
+A: In a shell hooked by Island, just prefix the command with `nosandbox`.
+
+### Configuration
+
+**Q: Is there a way to reuse configurations across profiles?**
+
+A: Yes, you can use symlinks to share configuration files.
+
+**Q: Is `~/` expansion supported in paths?**
+
+A: Not directly, but upcoming variable handling will support `${home}/`.
+
+**Q: Can a context be based on the program instead of the working directory?**
+
+A: While feasible, Island focuses on data-centric security policies (based on location/project) rather than application-centric ones.
+
+**Q: What happens if multiple profiles' contexts match the current working directory?**
+
+A: Island applies all matching profiles in order of specificity (broadest path first). The restrictions are combined, meaning access is only granted if *all* matching profiles allow it.
+
+### Concepts & Security
+
+**Q: What are XDG directories?**
+
+A: These are standard directories defined by the XDG Base Directory specification (e.g., `.config`, `.local/share`) used by modern applications to store configuration and data.
+
+**Q: What is the cache directory used for?**
+
+A: Island itself doesn't use a cache, but sandboxed applications may use `$XDG_CACHE_HOME` for temporary storage.
+
+**Q: How do I launch a graphical application or use D-Bus services?**
+
+A: The relevant sockets must be exposed in `$XDG_RUNTIME_DIR` (e.g., via symlinks) and allowed by the profile. Note that exposing these services extend (or bypass) the sandbox restrictions.
+
+**Q: What if a profile allows modification of Island's configuration?**
+
+A: This would be a security issue to fix in the profile configuration.

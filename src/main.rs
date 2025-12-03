@@ -100,9 +100,11 @@ enum Commands {
 #[command(
     name = "island",
     about = "A sandboxing tool using Landlock for secure command execution",
-    long_about = "Island is a command-line tool that executes programs in a restricted \
-        environment using Linux's Landlock security module. It applies filesystem and network \
-        access controls based on profile configurations to limit what sandboxed programs can do.",
+    long_about = "Island is a sandboxing tool that executes programs in restricted \
+        environments thanks to Landlock. It applies filesystem, network, and IPC access control \
+        based on profile configurations to limit what sandboxed programs can do. \
+        \n \
+        See https://github.com/landlock-lsm/island for more information.",
     version
 )]
 struct Cli {
