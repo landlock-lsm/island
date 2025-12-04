@@ -304,7 +304,7 @@ export PATH="$PATH:$HOME/.cargo/bin"
 ## Requirements
 
 - Linux with Landlock support (kernel 5.13+).
-- Rust 1.82 or later for building from source.
+- Rust 1.89 or later for building from source.
 
 ## Security model and current limitations
 
