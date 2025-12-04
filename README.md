@@ -31,6 +31,7 @@ $ cd island
 $ cargo install --path .
 $ export PATH="$PATH:$HOME/.cargo/bin"
 $ rehash
+$ source <(island completion zsh)
 $ source <(island hook zsh)
 
 # Create a profile for your project:
@@ -283,6 +284,22 @@ $ env | grep XDG_CONFIG_HOME
 XDG_CONFIG_HOME=/home/user/.config/island-config-profiles/customer-a
 ```
 
+## Shell completion
+
+Island can generate shell completion scripts for several shells.
+
+For Zsh, to load completions for the current session:
+
+```sh
+source <(island completion zsh)
+```
+
+To make it permanent, save the output to a file in your `fpath`, for example:
+
+```sh
+island completion zsh >~/.zsh/comp/_island
+```
+
 ## Installation
 
 Currently, Island must be built from source:
@@ -326,7 +343,6 @@ Current limitations:
 
 ## TODO
 
-- Command auto-completion: Shell completion support for profiles and commands.
 - Configuration validation: Deny unknown config properties with helpful error messages.
 - Landlock variables: Add support for `landlock_variables` extension in `[[env]]` entries.
 - Default profiles: Auto-create working profiles by parsing PATH and adding common directory access when no config exists.

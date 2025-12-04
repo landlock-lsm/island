@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::generate;
 use landlock::RulesetError;
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
 use std::{
@@ -38,8 +39,28 @@ impl Verbose {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum Shell {
+enum HookShell {
     Zsh,
+}
+
+// Only list shells running on Linux.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Elvish,
+    Fish,
+    Zsh,
+}
+
+impl From<CompletionShell> for clap_complete::Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Bash => clap_complete::Shell::Bash,
+            CompletionShell::Elvish => clap_complete::Shell::Elvish,
+            CompletionShell::Fish => clap_complete::Shell::Fish,
+            CompletionShell::Zsh => clap_complete::Shell::Zsh,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -94,10 +115,16 @@ enum Commands {
     )]
     Hook {
         #[arg(help = "Shell to generate integration for (currently only Zsh is supported)")]
-        shell: Shell,
+        shell: HookShell,
 
         #[arg(long, help = "Output the script to remove the shell integration")]
         undo: bool,
+    },
+
+    #[command(about = "Generate shell completion scripts")]
+    Completion {
+        #[arg(help = "Shell to generate completion for")]
+        shell: CompletionShell,
     },
 
     #[command(
@@ -327,7 +354,7 @@ fn main() -> Result<(), IslandError> {
         }
         Commands::Hook { shell, undo } => {
             match shell {
-                Shell::Zsh => {
+                HookShell::Zsh => {
                     if undo {
                         println!("_island_unhook 2>/dev/null || :");
                     } else {
@@ -385,6 +412,17 @@ fn main() -> Result<(), IslandError> {
             for path in full_paths {
                 println!("- {}", path.display());
             }
+            Ok(())
+        }
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            generate(
+                clap_complete::Shell::from(shell),
+                &mut cmd,
+                name,
+                &mut io::stdout(),
+            );
             Ok(())
         }
     }
