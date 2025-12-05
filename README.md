@@ -17,8 +17,14 @@ Developed alongside the kernel feature and its Rust libraries, it bridges the ga
 - Context-aware activation: Automatically applies security profiles based on your **current working directory**.
 - Full environment isolation: Manages isolated workspaces (XDG directories, `TMPDIR`) in addition to access control.
 - Transparent shell integration: Automatically sandboxes commands in your shell without changing your workflow.
+- Zero-privilege operation: No root access or special capabilities required.
+- Layered protection: Multiple profiles compose cleanly with deterministic ordering. Landlock restrictions accumulate across multiple profiles (broadest to most specific). Since Landlock permissions are intersected, a child profile can only *reduce* access granted by parent profiles, not expand it.
 
 By tying security policies to locations rather than just applications, Island enables natural, invisible sandboxing where `cd project && island run -- command` just works.
+
+Island is a tool for users, not against them.
+Unlike traditional access control systems designed to restrict users, Island empowers you to restrict the *programs* you run.
+You are willingly sandboxing your commands to protect your data from buggy, malicious, or exploited software.
 
 ## TL;DR
 
@@ -85,6 +91,35 @@ Execution process:
 4. Security setup: Load Landlock policies and create nested restrictions.
 5. Command execution: Run target program in the secured environment.
 
+### Profile structure
+
+```
+~/.config/island/profiles/
+├── customer-a
+│   ├── profile.toml
+│   ├── landlock
+│   │   ├── base.toml
+│   │   └── home-config-ro.toml
+│   ├── workspace-cache -> /home/user/.cache/island-cache-profiles/customer-a
+│   ├── workspace-config -> /home/user/.config/island-config-profiles/customer-a
+│   ├── workspace-data -> /home/user/.local/share/island-data-profiles/customer-a
+│   ├── workspace-run -> /run/user/1000/island-run-profiles/customer-a
+│   ├── workspace-state -> /home/user/.local/state/island-state-profiles/customer-a
+│   └── workspace-tmp -> /tmp/island-tmp-1000-customer-a-gMiVQK
+└── personal
+    ├── profile.toml
+    ├── landlock
+    │   └── strict.toml
+    └── workspace-* symlinks...
+```
+
+The workspace symlinks are automatically created and managed by Island. They provide:
+
+- Isolation: Each profile's applications see only their own configuration and data.
+- Easy introspection: You can easily see which directories a profile uses by examining its symlinks.
+- XDG compliance: Programs supporting the XDG specification automatically benefit from this isolation.
+- Development workflow: Different profiles can have completely different tool configurations (e.g., different IDE settings, Git configs, SSH keys).
+
 ### Creating a profile
 
 You can easily create a new profile using the `create` command.
@@ -125,35 +160,6 @@ We can avoid to always prefix commands with `island run` thanks to the [shell in
 ### Best practice
 
 For proper isolation, files should be organized in dedicated directory hierarchies that match profiles (e.g., `~/work/customer-a/`, `~/work/customer-b/`, `~/personal/`) rather than mixing different contexts in the same directories.
-
-### Profile structure
-
-```
-~/.config/island/profiles/
-├── customer-a
-│   ├── profile.toml
-│   ├── landlock
-│   │   ├── base.toml
-│   │   └── home-config-ro.toml
-│   ├── workspace-cache -> /home/user/.cache/island-cache-profiles/customer-a
-│   ├── workspace-config -> /home/user/.config/island-config-profiles/customer-a
-│   ├── workspace-data -> /home/user/.local/share/island-data-profiles/customer-a
-│   ├── workspace-run -> /run/user/1000/island-run-profiles/customer-a
-│   ├── workspace-state -> /home/user/.local/state/island-state-profiles/customer-a
-│   └── workspace-tmp -> /tmp/island-tmp-1000-customer-a-gMiVQK
-└── personal
-    ├── profile.toml
-    ├── landlock
-    │   └── strict.toml
-    └── workspace-* symlinks...
-```
-
-The workspace symlinks are automatically created and managed by Island. They provide:
-
-- Isolation: Each profile's applications see only their own configuration and data.
-- Easy introspection: You can easily see which directories a profile uses by examining its symlinks.
-- XDG compliance: Programs supporting the XDG specification automatically benefit from this isolation.
-- Development workflow: Different profiles can have completely different tool configurations (e.g., different IDE settings, Git configs, SSH keys).
 
 Example `profile.toml`:
 
@@ -198,23 +204,6 @@ parent = ["/home/user/shared"]
 ```
 
 See the [Landlock Config documentation](https://github.com/landlock-lsm/landlockconfig) for complete access control configuration options.
-
-## Features
-
-### Workflow
-
-- Directory-driven security: Profiles activate automatically based on your current location.
-- Zero application changes: Works with any existing program that supports XDG directories.
-- Easy profile management: Self-contained profile directories that can be shared and version controlled.
-- Context awareness: Environment variables expose matched paths for scripts and applications.
-- Flexible usage: Support both explicit profile selection and automatic directory-based activation.
-
-### Security
-
-- Zero-privilege operation: No root access or special capabilities required.
-- Layered protection: Multiple profiles compose cleanly with deterministic ordering. Landlock restrictions accumulate across multiple profiles (broadest to most specific). Since Landlock permissions are intersected, a child profile can only *reduce* access granted by parent profiles, not expand it.
-- Complete environment isolation: XDG-compliant workspace separation for configurations, data, and state. Each profile gets separate temporary and XDG directories.
-- Workspace validation: Prevents symlink attacks through path canonicalization and file ownership checks.
 
 ## Shell integration
 
