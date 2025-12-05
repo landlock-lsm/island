@@ -9,7 +9,7 @@ A sandboxing tool using Landlock for secure command execution.
 [Landlock](https://landlock.io) is a Linux Security Module (LSM) that empowers unprivileged processes to securely restrict their own access rights (e.g., filesystem, network).
 While Landlock provides powerful kernel primitives, using it typically requires modifying application code.
 
-Island makes Landlock practical for everyday workflows by acting as a high-level wrapper and policy manager.
+[Island](https://github.com/landlock-lsm/island) makes Landlock practical for everyday workflows by acting as a high-level wrapper and policy manager.
 Developed alongside the kernel feature and its Rust libraries, it bridges the gap between raw security mechanisms and user activity through:
 
 - Zero-code integration: Runs existing binaries without modification.
