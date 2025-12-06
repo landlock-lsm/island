@@ -20,6 +20,8 @@ use config::{is_profile_name_valid, ConfigError, IslandConfig, ResolvedProfile};
 
 mod context;
 
+mod lock;
+
 mod workspace;
 
 mod tests_profile;

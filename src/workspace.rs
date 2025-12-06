@@ -8,6 +8,7 @@
 
 use crate::{
     config::{IslandConfig, Profile, ResolvedProfile},
+    lock::{ExclusiveLock, ProfileGuard, ProfileLock, SharedLock, SharedLockError},
     IslandError, Verbose,
 };
 use landlock::{path_beneath_rules, Access, AccessFs, RulesetCreatedAttr, ABI};
@@ -342,12 +343,6 @@ impl AbsoluteWorkspace {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum Lock {
-    Shared,
-    Exclusive,
-}
-
 /// Manages workspace setup and configuration for a profile.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct WorkspaceManager {
@@ -381,53 +376,45 @@ impl WorkspaceManager {
 
         // Set up workspace directories for all workspace environment variables.
         // First pass: check if changes are needed.
-        if let Some(env_vars) = Self::resolve_workspaces(
+        match Self::resolve_workspaces::<SharedLock, E>(
             &profile_dir,
             resolved_profile,
             &symlink_original_env,
             &read_env,
             verbose,
-            Lock::Shared,
-        )? {
-            return Ok(Self { env_vars });
+        ) {
+            Ok(env_vars) => Ok(Self { env_vars }),
+            Err(SharedLockError::Island(e)) => Err(e),
+            Err(SharedLockError::NeedsUpdate) => {
+                // Second pass: potentially perform changes.
+                Ok(Self {
+                    env_vars: Self::resolve_workspaces::<ExclusiveLock, E>(
+                        &profile_dir,
+                        resolved_profile,
+                        &symlink_original_env,
+                        &read_env,
+                        verbose,
+                    )?,
+                })
+            }
         }
-
-        // Second pass: potentially perform changes.
-        let env_vars = Self::resolve_workspaces(
-            &profile_dir,
-            resolved_profile,
-            &symlink_original_env,
-            &read_env,
-            verbose,
-            Lock::Exclusive,
-        )?
-        .ok_or_else(|| {
-            // This should only happen if a concurrent change happened without
-            // exclusive locking (i.e. not from Island).
-            io::Error::other("Failed to resolve workspace: concurrent modification detected")
-        })?;
-
-        Ok(Self { env_vars })
     }
 
-    fn resolve_workspaces<E>(
+    fn resolve_workspaces<L, E>(
         profile_dir: &Path,
         resolved_profile: &ResolvedProfile,
         symlink_original_env: &HashMap<String, Option<String>>,
         read_env: &E,
         verbose: &Verbose,
-        lock: Lock,
-    ) -> Result<Option<BTreeMap<String, String>>, IslandError>
+    ) -> Result<BTreeMap<String, String>, L::Error>
     where
+        L: ProfileLock,
         E: Fn(&str) -> Result<String, VarError>,
     {
         let mut env_vars: BTreeMap<String, String> = BTreeMap::new();
 
-        let profile_lock = fs::File::open(profile_dir)?;
-        match lock {
-            Lock::Shared => profile_lock.lock_shared()?,
-            Lock::Exclusive => profile_lock.lock()?,
-        }
+        let dir = fs::File::open(profile_dir)?;
+        let guard = ProfileGuard::<L>::new(&dir)?;
 
         for workspace in SYMLINK_WORKSPACES {
             let env_var = workspace.env_var();
@@ -452,11 +439,7 @@ impl WorkspaceManager {
                         });
                         Some(resolved_path)
                     }
-                    Err(e) => {
-                        if lock == Lock::Shared {
-                            return Ok(None);
-                        }
-
+                    Err(e) => guard.modify(|| {
                         eprintln!(
                             "Warning: failed to resolve directory {}: {}",
                             symlink_path.display(),
@@ -468,30 +451,26 @@ impl WorkspaceManager {
                             format!("Removing insecure symlink: {}", symlink_path.display())
                         });
                         fs::remove_file(&symlink_path)?;
-                        None
-                    }
+                        Ok(None)
+                    })?,
                 }
             } else {
                 if symlink_path.is_symlink() {
-                    if lock == Lock::Shared {
-                        return Ok(None);
-                    }
-
-                    // The target is missing.
-                    verbose
-                        .print(|| format!("Removing outdated symlink: {}", symlink_path.display()));
-                    fs::remove_file(&symlink_path)?;
+                    guard.modify(|| {
+                        // The target is missing.
+                        verbose.print(|| {
+                            format!("Removing outdated symlink: {}", symlink_path.display())
+                        });
+                        fs::remove_file(&symlink_path)?;
+                        Ok(())
+                    })?;
                 }
                 None
             };
 
             let target_path = match target_path {
                 Some(path) => path,
-                None => {
-                    if lock == Lock::Shared {
-                        return Ok(None);
-                    }
-
+                None => guard.modify(|| {
                     // Create a new directory for this workspace environment type.
                     let target_path = workspace.create_directory(
                         resolved_profile.name,
@@ -506,8 +485,8 @@ impl WorkspaceManager {
                         )
                     });
                     symlink(&target_path, &symlink_path)?;
-                    target_path
-                }
+                    Ok(target_path)
+                })?,
             };
 
             env_vars.insert(
@@ -528,7 +507,7 @@ impl WorkspaceManager {
             verbose.print(|| format!("Set {}={}", env_var, target_path.display()));
         }
 
-        Ok(Some(env_vars))
+        Ok(env_vars)
     }
 
     pub fn update_ruleset(
