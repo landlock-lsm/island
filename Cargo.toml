@@ -12,6 +12,7 @@ exclude = [".gitignore"]
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
+elf = "0.8.0"
 landlock = "0.4.3"
 landlockconfig = { git = "https://github.com/landlock-lsm/landlockconfig", rev = "8b6b59b339181f9fa1ec6f7889564ba154c1a47d" }
 libc = "0.2"

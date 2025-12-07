@@ -20,6 +20,8 @@ use config::{is_profile_name_valid, ConfigError, IslandConfig, ResolvedProfile};
 
 mod context;
 
+mod elf_utils;
+
 mod workspace;
 
 mod tests_profile;
@@ -144,6 +146,16 @@ enum Commands {
                 These paths will be converted to absolute paths and stored in the profile configuration."
         )]
         when_beneath: Vec<String>,
+
+        #[arg(
+            short = 'w',
+            long,
+            help = "Adds binary and it\'s dynamic libraries to the profile",
+            long_help = "Attempts to resolve the libraries a program requires by reading it\'s ELF \
+                metadata. The binary itself and the dynamic libraries will recieve read and execute \
+                access, and those accesses will be handled automatically."
+        )]
+        with_executables : Vec<String>,
     },
     // TODO: Add profile management subcommands (list, show)
 }
@@ -179,6 +191,9 @@ enum IslandError {
 
     #[error(transparent)]
     Config(#[from] ConfigError),
+
+    #[error(transparent)]
+    Elf(#[from] elf_utils::ElfError),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -291,6 +306,31 @@ where
     fs::canonicalize(&path).or_else(|_| path::absolute(&path))
 }
 
+/// Resolve an executable path, searching PATH if necessary.
+fn resolve_executable_path(exec: &str) -> io::Result<PathBuf> {
+    let path = Path::new(exec);
+    
+    // If it's an absolute path or contains a slash, use it directly
+    if path.is_absolute() || exec.contains('/') {
+        return try_canonicalize(path);
+    }
+    
+    // Search in PATH
+    if let Ok(path_env) = env::var("PATH") {
+        for dir in path_env.split(':') {
+            let candidate = Path::new(dir).join(exec);
+            if candidate.exists() && candidate.is_file() {
+                return candidate.canonicalize();
+            }
+        }
+    }
+    
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("Executable '{}' not found in PATH", exec),
+    ))
+}
+
 fn resolve_profiles<'a>(
     island_config: &'a IslandConfig,
     profile_names: &[String],
@@ -367,6 +407,7 @@ fn main() -> Result<(), IslandError> {
         Commands::Create {
             name,
             when_beneath: paths,
+            with_executables : executable_paths,
         } => {
             if !is_profile_name_valid(&name) {
                 return Err(IslandError::Io(io::Error::new(
@@ -402,10 +443,44 @@ fn main() -> Result<(), IslandError> {
                 + "\n";
             std::fs::write(profile_dir.join("profile.toml"), profile_content)?;
 
-            std::fs::write(
-                landlock_dir.join("island-default-base.toml"),
-                include_str!("../assets/landlock/island-default-base.toml"),
-            )?;
+            // Only create the default base config if --with-executables is not specified
+            if executable_paths.is_empty() {
+                std::fs::write(
+                    landlock_dir.join("island-default-base.toml"),
+                    include_str!("../assets/landlock/island-default-base.toml"),
+                )?;
+            }
+
+            // Process --with-executables if provided
+            if !executable_paths.is_empty() {
+                println!("Added executable rules for:");
+                for exec_path in &executable_paths {
+                    // Resolve the executable path (handle both absolute and PATH-relative)
+                    let resolved_path = resolve_executable_path(exec_path)?;
+                    verbose.print(|| format!("Resolving libraries for: {}", resolved_path.display()));
+                    
+                    let info = elf_utils::resolve_executable(&resolved_path)?;
+                    verbose.print(|| format!("  Found {} libraries", info.library_paths.len()));
+
+                    // Get the binary name for the TOML filename
+                    let binary_name = resolved_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    let toml_filename = format!("{}.toml", binary_name);
+
+                    let toml_content = elf_utils::generate_executable_toml(&info);
+                    std::fs::write(
+                        landlock_dir.join(&toml_filename),
+                        &toml_content,
+                    )?;
+                    
+                    println!("  - {} ({} libraries) -> {}",
+                        info.executable_path.display(),
+                        info.library_paths.len(),
+                        toml_filename);
+                }
+            }
 
             println!("Created profile \"{}\" in {}", name, profile_dir.display());
             println!("It applies to:");
