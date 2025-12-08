@@ -469,7 +469,7 @@ fn main() -> Result<(), IslandError> {
                         .unwrap_or("unknown");
                     let toml_filename = format!("{}.toml", binary_name);
 
-                    let toml_content = elf_utils::generate_executable_toml(&info);
+                    let toml_content = elf_utils::generate_executable_toml(&info)?;
                     std::fs::write(
                         landlock_dir.join(&toml_filename),
                         &toml_content,

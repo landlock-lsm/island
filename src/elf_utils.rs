@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Utilities for parsing ELF binaries and resolving their dynamic library dependencies.
-
+#![forbid(clippy::unwrap_used)]
+#![forbid(clippy::expect_used)]
+#![forbid(clippy::panic)] // This lint specifically targets the panic! macro
+#![forbid(clippy::todo)] // The todo! macro also causes a panic
 use elf::abi::{DT_NEEDED, DT_RPATH, DT_RUNPATH, PT_INTERP};
 use elf::endian::AnyEndian;
 use elf::ElfBytes;
@@ -23,6 +26,12 @@ pub enum ElfError {
 
     #[error("Could not resolve library '{0}' required by '{1}'")]
     LibraryNotFound(String, PathBuf),
+
+    #[error("Failed to parse TOML template: {0}")]
+    ElfDefaultTomlParse(#[from] toml::de::Error),
+
+    #[error("Failed to serialize TOML: {0}")]
+    ElfTomlSerialize(#[from] toml::ser::Error),
 }
 
 /// Information about an executable and its required libraries.
@@ -256,10 +265,9 @@ const EXECUTABLE_BASE_TOML: &str = include_str!("../assets/landlock/executable-b
 /// Generate a TOML configuration for a single executable's access rules.
 ///
 /// Returns the TOML content as a string.
-pub fn generate_executable_toml(exec_info: &ExecutableInfo) -> String {
+pub fn generate_executable_toml(exec_info: &ExecutableInfo) -> Result<String, ElfError> {
     // Parse the base template
-    let mut doc: toml::Table = toml::from_str(EXECUTABLE_BASE_TOML)
-        .expect("Failed to parse executable-base.toml template");
+    let mut doc: toml::Table = toml::from_str(EXECUTABLE_BASE_TOML)?;
 
     // Collect all paths (executable + libraries + interpreter)
     let mut all_paths: BTreeSet<&Path> = BTreeSet::new();
@@ -285,7 +293,7 @@ pub fn generate_executable_toml(exec_info: &ExecutableInfo) -> String {
     }
 
     // Serialize back to TOML string
-    toml::to_string_pretty(&doc).expect("Failed to serialize TOML")
+    Ok(toml::to_string_pretty(&doc)?)
 }
 
 #[cfg(test)]
