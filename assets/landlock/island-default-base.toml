@@ -34,11 +34,15 @@ parent = [
     "/dev/zero",
 ]
 
-# System configuration files.
+# System configuration and introspection files.
 [[path_beneath]]
 allowed_access = [
     "read_dir",
     "read_file",
     "refer",
 ]
-parent = ["/etc"]
+parent = [
+    "/etc",
+    "/proc/self",
+    "/proc/cpuinfo",
+]
