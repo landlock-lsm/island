@@ -2,18 +2,38 @@
 
 use std::process::Command;
 
-fn main() {
-    let commit = match Command::new("git").args(["rev-parse", "HEAD"]).output() {
-        Ok(output) if output.status.success() => {
-            // Do not rely on local configuration (i.e. core.abbrev) for length.
+fn run_git(args: &[&str]) -> String {
+    // It's simpler to rely on the git command instead of a crate for just this
+    // use case.
+    Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
             String::from_utf8_lossy(&output.stdout)
                 .chars()
-                .take(12)
+                .filter(|c| c.is_alphanumeric() || *c == '-')
                 .collect()
-        }
-        _ => "unknown".to_string(),
-    };
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
-    println!("cargo:rustc-env=GIT_COMMIT={}", commit);
-    println!("cargo:rerun-if-changed=.git/HEAD");
+fn main() {
+    println!(
+        "cargo:rustc-env=GIT_COMMIT={}",
+        run_git(&[
+            "describe",
+            "--always",
+            // Do not rely on local configuration (i.e. core.abbrev) for length.
+            "--abbrev=12",
+            "--exclude=*",
+            "--dirty",
+        ])
+    );
+
+    println!(
+        "cargo:rustc-env=GIT_DATE={}",
+        run_git(&["log", "--max-count=1", "--format=%cs"])
+    );
 }

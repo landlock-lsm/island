@@ -159,7 +159,7 @@ enum Commands {
         based on profile configurations to limit what sandboxed programs can do. \
         \n \
         See https://github.com/landlock-lsm/island for more information.",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (commit ", env!("GIT_COMMIT"), ")")
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_COMMIT"), " ", env!("GIT_DATE"), ")")
 )]
 struct Cli {
     #[arg(
