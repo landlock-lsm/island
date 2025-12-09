@@ -8,7 +8,7 @@
 
 use crate::{
     config::{IslandConfig, Profile, ResolvedProfile},
-    lock::{ExclusiveLock, ProfileGuard, ProfileLock, SharedLock, SharedLockError},
+    lock::{ExclusiveLock, ProfileLock, SharedLock, SharedLockError},
     IslandError, Verbose,
 };
 use landlock::{path_beneath_rules, Access, AccessFs, RulesetCreatedAttr, ABI};
@@ -17,7 +17,7 @@ use std::{
     env::VarError,
     fs, io,
     os::unix::fs::{symlink, MetadataExt},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 /// XDG directories
@@ -363,8 +363,6 @@ impl WorkspaceManager {
             return Ok(Default::default());
         }
 
-        let profile_dir = island_config.profile_dir(resolved_profile.name);
-
         // Collect original workspace environment variables before any modifications.
         let symlink_original_env: HashMap<String, Option<String>> = SYMLINK_WORKSPACES
             .iter()
@@ -376,20 +374,22 @@ impl WorkspaceManager {
 
         // Set up workspace directories for all workspace environment variables.
         // First pass: check if changes are needed.
-        match Self::resolve_workspaces::<SharedLock, E>(
-            &profile_dir,
+        match Self::resolve_workspaces::<SharedLock<IslandError>, E>(
+            island_config,
+            resolved_profile.name,
             resolved_profile,
             &symlink_original_env,
             &read_env,
             verbose,
         ) {
             Ok(env_vars) => Ok(Self { env_vars }),
-            Err(SharedLockError::Island(e)) => Err(e),
+            Err(SharedLockError::Inner(e)) => Err(e),
             Err(SharedLockError::NeedsUpdate) => {
                 // Second pass: potentially perform changes.
                 Ok(Self {
-                    env_vars: Self::resolve_workspaces::<ExclusiveLock, E>(
-                        &profile_dir,
+                    env_vars: Self::resolve_workspaces::<ExclusiveLock<IslandError>, E>(
+                        island_config,
+                        resolved_profile.name,
                         resolved_profile,
                         &symlink_original_env,
                         &read_env,
@@ -401,7 +401,8 @@ impl WorkspaceManager {
     }
 
     fn resolve_workspaces<L, E>(
-        profile_dir: &Path,
+        island_config: &IslandConfig,
+        profile_name: &str,
         resolved_profile: &ResolvedProfile,
         symlink_original_env: &HashMap<String, Option<String>>,
         read_env: &E,
@@ -409,16 +410,16 @@ impl WorkspaceManager {
     ) -> Result<BTreeMap<String, String>, L::Error>
     where
         L: ProfileLock,
+        L::Error: From<IslandError> + From<io::Error>,
         E: Fn(&str) -> Result<String, VarError>,
     {
         let mut env_vars: BTreeMap<String, String> = BTreeMap::new();
 
-        let dir = fs::File::open(profile_dir)?;
-        let guard = ProfileGuard::<L>::new(&dir)?;
+        let profile_guard = island_config.guard_profile::<L>(profile_name)?;
 
         for workspace in SYMLINK_WORKSPACES {
             let env_var = workspace.env_var();
-            let symlink_path = profile_dir.join(workspace.symlink_name());
+            let symlink_path = profile_guard.path().join(workspace.symlink_name());
 
             // Try to use existing path, removing if error (e.g. broken symlink).
             let target_path = if symlink_path.exists() {
@@ -439,7 +440,7 @@ impl WorkspaceManager {
                         });
                         Some(resolved_path)
                     }
-                    Err(e) => guard.modify(|| {
+                    Err(e) => profile_guard.modify(|| {
                         eprintln!(
                             "Warning: failed to resolve directory {}: {}",
                             symlink_path.display(),
@@ -456,7 +457,7 @@ impl WorkspaceManager {
                 }
             } else {
                 if symlink_path.is_symlink() {
-                    guard.modify(|| {
+                    profile_guard.modify(|| {
                         // The target is missing.
                         verbose.print(|| {
                             format!("Removing outdated symlink: {}", symlink_path.display())
@@ -470,7 +471,7 @@ impl WorkspaceManager {
 
             let target_path = match target_path {
                 Some(path) => path,
-                None => guard.modify(|| {
+                None => profile_guard.modify(|| {
                     // Create a new directory for this workspace environment type.
                     let target_path = workspace.create_directory(
                         resolved_profile.name,

@@ -2,6 +2,7 @@
 
 use crate::{
     context::{ContextEntry, ContextSet},
+    lock::{ExclusiveLock, ProfileGuard, ProfileLock, SharedLock, SharedLockError},
     workspace::WorkspaceManager,
     IslandError, Verbose,
 };
@@ -11,10 +12,31 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsStr,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
+
+pub const ISLAND_DEFAULT_CONFIG_BASE_NAME: &str = "island-default-base.toml";
+pub const ISLAND_DEFAULT_CONFIG_BASE_CONTENT: &str =
+    include_str!("../assets/landlock/island-default-base.toml");
+
+fn check_profile_default<L>(profile_guard: &ProfileGuard<L>) -> io::Result<Option<PathBuf>>
+where
+    L: ProfileLock,
+{
+    let default_base_path = profile_guard
+        .path_landlock()
+        .join(ISLAND_DEFAULT_CONFIG_BASE_NAME);
+
+    if default_base_path.exists() {
+        let content = fs::read_to_string(&default_base_path)?;
+        if content != ISLAND_DEFAULT_CONFIG_BASE_CONTENT {
+            return Ok(Some(default_base_path));
+        }
+    }
+    Ok(None)
+}
 
 #[derive(Debug, Error)]
 pub enum LandlockConfigErrorKind {
@@ -111,7 +133,7 @@ impl PartialOrd for ResolvedProfile<'_> {
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error(transparent)]
     TomlParse(#[from] toml::de::Error),
     #[error("no context found for current directory: {cwd}")]
@@ -124,7 +146,7 @@ pub enum ConfigError {
     ProfilesDirectory {
         path: String,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
     #[error(transparent)]
     LandlockConfig(#[from] LandlockConfigError),
@@ -265,7 +287,7 @@ impl IslandConfig {
         canonicalize_path: F,
     ) -> Result<Profile, ConfigError>
     where
-        F: Fn(&Path) -> std::io::Result<PathBuf>,
+        F: Fn(&Path) -> io::Result<PathBuf>,
     {
         let mut profile = Profile::default();
         let cfg = toml::from_str::<ProfileConfig>(content)?;
@@ -349,15 +371,30 @@ impl IslandConfig {
         Ok(resolved)
     }
 
+    pub fn guard_profile<L>(&self, profile_name: &str) -> io::Result<ProfileGuard<L>>
+    where
+        L: ProfileLock,
+    {
+        let profile_dir = self.profiles_dir.join(profile_name);
+        ProfileGuard::<L>::new(profile_dir)
+    }
+
     /// Loads landlock configuration for a profile by name.
-    pub fn load_landlock_config(
-        &self,
-        profile_name: &str,
-    ) -> Result<ResolvedConfig, LandlockConfigError> {
-        let landlock_dir = self.profiles_dir.join(profile_name).join("landlock");
+    pub fn load_landlock_config(&self, profile_name: &str) -> Result<ResolvedConfig, ConfigError> {
+        let profile_guard = self.guard_profile::<SharedLock<ConfigError>>(profile_name)?;
+
+        if let Some(path) = check_profile_default(&profile_guard)? {
+            eprintln!(
+                "Warning: {} is not the latest version. \
+                Run \"island update\" to fix it.",
+                path.display()
+            );
+        }
+
+        let landlock_dir = profile_guard.path_landlock();
 
         // Parse the configuration with profile-specific error context.
-        Config::parse_directory(&landlock_dir, ConfigFormat::Toml)
+        Ok(Config::parse_directory(&landlock_dir, ConfigFormat::Toml)
             .map_err(|source| LandlockConfigError {
                 profile_name: profile_name.to_string(),
                 landlock_dir: landlock_dir.clone(),
@@ -368,7 +405,40 @@ impl IslandConfig {
                 profile_name: profile_name.to_string(),
                 landlock_dir,
                 kind: LandlockConfigErrorKind::Resolve { source },
-            })
+            })?)
+    }
+
+    // Even if this command is dedicated to change a configuration file, this
+    // might not be necessary, and we should favor non-exclusive operations
+    // related to profiles.  This is why we first try with a shared lock, and we
+    // may read two times the same configuration file.
+    pub fn update_profile_default(&self, profile_name: &str) -> Result<(), IslandError> {
+        // First pass: check if changes are needed with a shared lock.
+        match self.update_profile_default_lock::<SharedLock<IslandError>>(profile_name) {
+            Ok(()) => Ok(()),
+            Err(SharedLockError::Inner(e)) => Err(e),
+            Err(SharedLockError::NeedsUpdate) => {
+                // Second pass: perform changes with an exclusive lock.
+                self.update_profile_default_lock::<ExclusiveLock<IslandError>>(profile_name)
+            }
+        }
+    }
+
+    fn update_profile_default_lock<L>(&self, profile_name: &str) -> Result<(), L::Error>
+    where
+        L: ProfileLock,
+        L::Error: From<IslandError> + From<io::Error>,
+    {
+        let profile_guard = self.guard_profile::<L>(profile_name)?;
+
+        if let Some(path) = check_profile_default(&profile_guard)? {
+            profile_guard.modify(|| {
+                fs::write(&path, ISLAND_DEFAULT_CONFIG_BASE_CONTENT)?;
+                println!("Updated {}", path.display());
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     /// Resolves profiles by explicit profile names.
@@ -405,9 +475,8 @@ impl IslandConfig {
             .collect()
     }
 
-    /// Returns the path to a specific profile directory.
-    pub fn profile_dir(&self, profile_name: &str) -> PathBuf {
-        self.profiles_dir.join(profile_name)
+    pub fn profile_names(&self) -> impl Iterator<Item = &String> + '_ {
+        self.profiles.keys()
     }
 }
 

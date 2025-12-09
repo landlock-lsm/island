@@ -91,6 +91,25 @@ Execution process:
 4. Security setup: Load Landlock policies and create nested restrictions.
 5. Command execution: Run target program in the secured environment.
 
+### Updating profiles
+
+When Island is updated, the default Landlock configuration embedded in the binary might change.
+To ensure your profiles benefit from the latest security defaults, you can update them:
+
+```sh
+# Update profiles active in the current directory
+island update
+
+# Update a specific profile
+island update my-profile
+
+# Update all profiles
+island update --all
+```
+
+This command checks if the `island-default-base.toml` file in your profiles matches the version embedded in the current Island binary and updates it if necessary.
+It will warn you if a profile is out of sync when you try to use it.
+
 ### Profile structure
 
 ```
@@ -335,7 +354,6 @@ Current limitations:
 - Configuration validation: Deny unknown config properties with helpful error messages.
 - Landlock variables: Add support for `landlock_variables` extension in `[[env]]` entries.
 - Default profiles: Auto-create working profiles by parsing PATH and adding common directory access when no config exists.
-- Profile management: Check if default Landlock configurations should be updated (and warn about symlinks).
 - Synthetic chained ruleset: Implement custom nesting to avoid 16-level Landlock kernel limit.
 - Testing: Add CI and comprehensive tests for profile inference, environment variable precedence, and workspace isolation.
 - Improved error messages: Better diagnostics for profile resolution failures and Landlock errors.

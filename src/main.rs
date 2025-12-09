@@ -147,6 +147,25 @@ enum Commands {
         )]
         when_beneath: Vec<String>,
     },
+
+    #[command(
+        about = "Update default profile files",
+        long_about = "Check the active or provided profiles for island-default-base.toml \
+            and update it if it differs from the embedded version."
+    )]
+    Update {
+        #[arg(
+            short,
+            long,
+            help = "Profile name to update",
+            long_help = "Name of the profile to update. Can be specified multiple times. \
+                If not provided, updates the profiles active in the current directory."
+        )]
+        profile: Vec<String>,
+
+        #[arg(long, help = "Update all profiles", conflicts_with = "profile")]
+        all: bool,
+    },
     // TODO: Add profile management subcommands (list, show)
 }
 
@@ -299,9 +318,7 @@ fn resolve_profiles<'a>(
     verbose: &Verbose,
 ) -> Result<Vec<ResolvedProfile<'a>>, IslandError> {
     let load_config = |name: &str| -> Result<ResolvedConfig, ConfigError> {
-        island_config
-            .load_landlock_config(name)
-            .map_err(|e| e.into())
+        island_config.load_landlock_config(name)
     };
 
     if !profile_names.is_empty() {
@@ -406,7 +423,7 @@ fn main() -> Result<(), IslandError> {
 
             std::fs::write(
                 landlock_dir.join("island-default-base.toml"),
-                include_str!("../assets/landlock/island-default-base.toml"),
+                config::ISLAND_DEFAULT_CONFIG_BASE_CONTENT,
             )?;
 
             println!("Created profile \"{}\" in {}", name, profile_dir.display());
@@ -425,6 +442,21 @@ fn main() -> Result<(), IslandError> {
                 name,
                 &mut io::stdout(),
             );
+            Ok(())
+        }
+        Commands::Update { profile, all } => {
+            let island_config = IslandConfig::new(|s| std::env::var(s))?;
+
+            if all {
+                for profile_name in island_config.profile_names() {
+                    island_config.update_profile_default(profile_name)?;
+                }
+            } else {
+                let resolved_profiles = resolve_profiles(&island_config, &profile, &verbose)?;
+                for profile in resolved_profiles {
+                    island_config.update_profile_default(profile.name)?;
+                }
+            }
             Ok(())
         }
     }

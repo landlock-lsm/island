@@ -57,9 +57,8 @@ fn test_profile_missing() {
 fn test_profile_mini() {
     let read_env = get_read_env("mini-landlock-config");
     let config = IslandConfig::new(&read_env).unwrap();
-    let load_config = |name: &str| -> Result<ResolvedConfig, ConfigError> {
-        config.load_landlock_config(name).map_err(|e| e.into())
-    };
+    let load_config =
+        |name: &str| -> Result<ResolvedConfig, ConfigError> { config.load_landlock_config(name) };
 
     let resolved_profiles = config
         .resolve_profiles_by_names(&["foo", "foo"], load_config)

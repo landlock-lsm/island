@@ -116,3 +116,15 @@ mod run {
         }
     }
 }
+
+mod update {
+    run_tests! {
+        "tests/commands/test_update.sh",
+        {
+            test_update_explicit,
+            test_update_implicit,
+            test_update_all,
+            test_update_nonexistent,
+        }
+    }
+}
