@@ -7,9 +7,18 @@
 
 use std::process::Command;
 
+fn get_envs() -> Vec<(&'static str, String)> {
+    let bin_path = env!("CARGO_BIN_EXE_island");
+    let bin_dir = std::path::Path::new(bin_path).parent().unwrap();
+    let path = std::env::var("PATH").unwrap();
+    let new_path = format!("{}:{}", bin_dir.display(), path);
+    vec![("PATH", new_path)]
+}
+
 fn run_test(exe: &str, args: &[&str], error_msg: String) {
     let output = Command::new(exe)
         .args(args)
+        .envs(get_envs())
         .output()
         .expect("failed to execute test program");
 
@@ -54,6 +63,15 @@ macro_rules! run_tests {
     }
 }
 
+mod version {
+    run_tests! {
+        "tests/commands/test_version.sh",
+        {
+            test_version,
+        }
+    }
+}
+
 mod shell_hook {
     run_tests! {
         "tests/shell/test_hook.zsh",
@@ -72,6 +90,29 @@ mod shell_hook {
             test_alias_collision,
             test_alias_eval,
             test_nosandbox,
+        }
+    }
+}
+
+mod create {
+    run_tests! {
+        "tests/commands/test_create.sh",
+        {
+            test_create_cwd,
+            test_create_with_directories,
+        }
+    }
+}
+
+mod run {
+    run_tests! {
+        "tests/commands/test_run.sh",
+        {
+            test_run_implicit_profile,
+            test_run_explicit_profiles,
+            test_run_exit_code,
+            test_run_restrict_access_dir,
+            test_run_restrict_signal,
         }
     }
 }
