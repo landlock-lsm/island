@@ -1,9 +1,9 @@
 #!/usr/bin/env zsh
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 #
-# Test script for Island Zsh hook integration.
+# Test script for the Island Zsh hook integration.
 #
-# Run this script with zsh: zsh tests/shell/test_hook.zsh
+# Called by tests/integration.rs
 
 set -ueo pipefail
 
@@ -22,154 +22,208 @@ function zle() {
 
 source "$HOOK_SCRIPT"
 
-fail() {
-    echo "FAIL: $1"
-    exit 1
-}
+source "$(dirname "$0")/../tap.sh"
 
 assert_wrapped() {
     local cmd="$1"
-    echo "DEBUG: Checking wrapped '$cmd'. List: ${_ISLAND_WRAPPED_CMDS[*]-}"
+    tap_debug "Checking wrapped '$cmd'. List: ${_ISLAND_WRAPPED_CMDS[*]-}"
     if (( ! ${+_ISLAND_WRAPPED_CMDS} )) || (( ! ${_ISLAND_WRAPPED_CMDS[(Ie)$cmd]} )); then
-        fail "Command '$cmd' was not wrapped. Wrapped: ${_ISLAND_WRAPPED_CMDS[*]-}"
+        tap_fail "Command '$cmd' was not wrapped. Wrapped: ${_ISLAND_WRAPPED_CMDS[*]-}"
     fi
     if ! functions "$cmd" >/dev/null; then
-        echo "DEBUG: functions $cmd failed"
+        tap_debug "functions $cmd failed"
         functions "$cmd"
-        fail "Wrapper function for '$cmd' does not exist"
+        tap_fail "Wrapper function for '$cmd' does not exist"
     fi
 }
 
 assert_not_wrapped() {
     local cmd="$1"
     if (( ${+_ISLAND_WRAPPED_CMDS} )) && (( ${_ISLAND_WRAPPED_CMDS[(Ie)$cmd]} )); then
-        fail "Command '$cmd' was wrapped but shouldn't be."
+        tap_fail "Command '$cmd' was wrapped but shouldn't be."
     fi
 }
 
 cleanup() {
     _island_precmd
-    # Clear aliases and functions created during test
+    # Clear aliases and functions created during test.
     unalias -m '*' 2>/dev/null || true
 }
 
-echo "Running Zsh hook tests..."
+test_simple_external() {
+    tap_start "Simple external command (ls)"
+    cleanup
+    _island_wrap_cmd "ls"
+    assert_wrapped "ls"
+    tap_pass
+}
 
-echo "Test 1: Simple external command (ls)"
-cleanup
-_island_wrap_cmd "ls"
-assert_wrapped "ls"
+test_simple_alias() {
+    tap_start "Simple alias (ll -> ls -l)"
+    cleanup
+    alias ll="ls -l"
+    _island_wrap_cmd "ll"
+    assert_wrapped "ls"
+    assert_not_wrapped "ll"
+    tap_pass
+}
 
-echo "Test 2: Simple alias (ll -> ls -l)"
-cleanup
-alias ll="ls -l"
-_island_wrap_cmd "ll"
-assert_wrapped "ls"
-assert_not_wrapped "ll"
+test_recursive_alias() {
+    tap_start "Recursive alias (la -> ll -> ls)"
+    cleanup
+    alias l="ls"
+    alias ll="l -l"
+    alias la="ll -a"
+    _island_wrap_cmd "la"
+    assert_wrapped "ls"
+    assert_not_wrapped "l"
+    assert_not_wrapped "ll"
+    assert_not_wrapped "la"
+    tap_pass
+}
 
-echo "Test 3: Recursive alias (la -> ll -> ls)"
-cleanup
-alias l="ls"
-alias ll="l -l"
-alias la="ll -a"
-_island_wrap_cmd "la"
-assert_wrapped "ls"
-assert_not_wrapped "l"
-assert_not_wrapped "ll"
-assert_not_wrapped "la"
+test_alias_env_var() {
+    tap_start "Alias with env var (mygrep -> GREP_COLOR=... grep)"
+    cleanup
+    alias grep="grep --color=auto"
+    alias mygrep="GREP_COLOR='1;32' grep"
+    _island_wrap_cmd "mygrep"
+    assert_wrapped "grep"
+    tap_pass
+}
 
-echo "Test 4: Alias with env var (mygrep -> GREP_COLOR=... grep)"
-cleanup
-alias grep="grep --color=auto"
-alias mygrep="GREP_COLOR='1;32' grep"
-_island_wrap_cmd "mygrep"
-assert_wrapped "grep"
+test_alias_precommand() {
+    tap_start "Alias with precommand modifier (exec_ls -> exec ls)"
+    cleanup
+    alias exec_ls="exec ls"
+    _island_wrap_cmd "exec_ls"
+    assert_wrapped "ls"
+    assert_not_wrapped "exec"
+    tap_pass
+}
 
-echo "Test 5: Alias with precommand modifier (exec_ls -> exec ls)"
-cleanup
-alias exec_ls="exec ls"
-_island_wrap_cmd "exec_ls"
-assert_wrapped "ls"
-assert_not_wrapped "exec"
+test_complex_alias() {
+    tap_start "Complex alias (complex -> VAR=1 nocorrect ls)"
+    cleanup
+    alias complex="VAR1=1 VAR2=2 nocorrect exec ls -la"
+    _island_wrap_cmd "complex"
+    assert_wrapped "ls"
+    assert_not_wrapped "nocorrect"
+    tap_pass
+    assert_not_wrapped "exec"
+}
 
-echo "Test 6: Complex alias (complex -> VAR=1 nocorrect ls)"
-cleanup
-alias complex="VAR1=1 VAR2=2 nocorrect exec ls -la"
-_island_wrap_cmd "complex"
-assert_wrapped "ls"
-assert_not_wrapped "nocorrect"
-assert_not_wrapped "exec"
+test_existing_function() {
+    tap_start "Existing function"
+    cleanup
+    function myfunc() { echo "func"; }
+    _island_wrap_cmd "myfunc"
+    assert_not_wrapped "myfunc"
+    unfunction myfunc
+    tap_pass
+}
 
-echo "Test 7: Existing function"
-cleanup
-function myfunc() { echo "func"; }
-_island_wrap_cmd "myfunc"
-assert_not_wrapped "myfunc"
-unfunction myfunc
+test_builtin() {
+    tap_start "Builtin (cd)"
+    cleanup
+    _island_wrap_cmd "cd"
+    assert_not_wrapped "cd"
+    tap_pass
+}
 
-echo "Test 8: Builtin (cd)"
-cleanup
-_island_wrap_cmd "cd"
-assert_not_wrapped "cd"
+test_nonexistent() {
+    tap_start "Non-existent command"
+    cleanup
+    _island_wrap_cmd "nonexistentcommand"
+    assert_not_wrapped "nonexistentcommand"
+    tap_pass
+}
 
-echo "Test 9: Non-existent command"
-cleanup
-_island_wrap_cmd "nonexistentcommand"
-assert_not_wrapped "nonexistentcommand"
+test_path_command() {
+    tap_start "Command with path (/usr/bin/ls)"
+    cleanup
+    _island_wrap_cmd "/usr/bin/ls"
+    assert_not_wrapped "/usr/bin/ls"
+    tap_pass
+}
 
-echo "Test 10: Command with path (/usr/bin/ls)"
-cleanup
-_island_wrap_cmd "/usr/bin/ls"
-assert_not_wrapped "/usr/bin/ls"
+test_idempotency() {
+    tap_start "Idempotency"
+    source "$HOOK_SCRIPT"
+    if [[ "$(type -w _island_accept_line)" != "_island_accept_line: function" ]]; then
+        tap_fail "_island_accept_line is not a function after re-sourcing"
+    fi
+    tap_pass
+}
 
-echo "Test 11: Idempotency"
-source "$HOOK_SCRIPT"
-if [[ "$(type -w _island_accept_line)" != "_island_accept_line: function" ]]; then
-    fail "_island_accept_line is not a function after re-sourcing"
-fi
+test_alias_collision() {
+    tap_start "Alias collision (ls is alias, wrap ls)"
+    cleanup
+    alias ls="ls --color=auto"
+    _island_wrap_cmd "ls"
+    assert_wrapped "ls"
+    tap_pass
+}
 
-echo "Test 12: Alias collision (ls is alias, wrap ls)"
-cleanup
-alias ls="ls --color=auto"
-_island_wrap_cmd "ls"
-assert_wrapped "ls"
+test_alias_eval() {
+    tap_start "Alias with eval (eval_ls -> eval ls)"
+    cleanup
+    alias eval_ls="eval ls"
+    _island_wrap_cmd "eval_ls"
+    assert_wrapped "ls"
+    tap_pass
+}
 
-echo "Test 13: Alias with eval (eval_ls -> eval ls)"
-cleanup
-alias eval_ls="eval ls"
-_island_wrap_cmd "eval_ls"
-assert_wrapped "ls"
+test_nosandbox() {
+    tap_start "nosandbox (nosandbox ls -> ls)"
+    cleanup
+    _island_accept_line_wrapper() {
+        BUFFER="nosandbox ls"
+        _island_accept_line
+    }
 
-echo "Test 14: nosandbox (nosandbox ls -> ls)"
-cleanup
-_island_accept_line_wrapper() {
+    # Mock zle to capture the buffer modification.
+    zle() {
+        if [[ "$1" == "_island_orig_accept_line" ]]; then
+            tap_debug "Final BUFFER: $BUFFER"
+        fi
+    }
+
+    # We need to mock _island_wrap_cmd to verify it's NOT called for ls.
+    _island_wrap_cmd() {
+        tap_debug "_island_wrap_cmd called for $1"
+        _ISLAND_WRAPPED_CMDS+=("$1")
+    }
+
     BUFFER="nosandbox ls"
     _island_accept_line
-}
-
-# Mock zle to capture the buffer modification
-zle() {
-    if [[ "$1" == "_island_orig_accept_line" ]]; then
-        echo "DEBUG: Final BUFFER: $BUFFER"
+    if (( ${+_ISLAND_WRAPPED_CMDS} )) && (( ${_ISLAND_WRAPPED_CMDS[(Ie)ls]} )); then
+        tap_fail "nosandbox ls resulted in wrapping ls"
     fi
+
+    # nosandbox is an alias to empty string, so it stays in the buffer but
+    # effectively disappears during execution.
+    if [[ "$BUFFER" != "nosandbox ls" ]]; then
+        tap_fail "Buffer was unexpectedly modified. Buffer: '$BUFFER'"
+    fi
+    tap_pass
 }
 
-# We need to mock _island_wrap_cmd to verify it's NOT called for ls
-_island_wrap_cmd() {
-    echo "DEBUG: _island_wrap_cmd called for $1"
-    _ISLAND_WRAPPED_CMDS+=("$1")
-}
+TESTS=(
+    test_simple_external
+    test_simple_alias
+    test_recursive_alias
+    test_alias_env_var
+    test_alias_precommand
+    test_complex_alias
+    test_existing_function
+    test_builtin
+    test_nonexistent
+    test_path_command
+    test_idempotency
+    test_alias_collision
+    test_alias_eval
+    test_nosandbox
+)
 
-BUFFER="nosandbox ls"
-_island_accept_line
-if (( ${+_ISLAND_WRAPPED_CMDS} )) && (( ${_ISLAND_WRAPPED_CMDS[(Ie)ls]} )); then
-    fail "nosandbox ls resulted in wrapping ls"
-fi
-
-# nosandbox is an alias to empty string, so it stays in the buffer but
-# effectively disappears during execution.
-if [[ "$BUFFER" != "nosandbox ls" ]]; then
-    fail "Buffer was unexpectedly modified. Buffer: '$BUFFER'"
-fi
-
-echo "All tests passed!"
+tap_run "$@"
