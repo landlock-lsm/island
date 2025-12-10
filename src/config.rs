@@ -17,13 +17,13 @@ use std::{
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum ProfileErrorKind {
-    #[error("Failed to parse configuration: {source}")]
+pub enum LandlockConfigErrorKind {
+    #[error("Failed to parse Landlock configuration: {source}")]
     Parse {
         #[source]
         source: ParseDirectoryError,
     },
-    #[error("Failed to resolve configuration: {source}")]
+    #[error("Failed to resolve Landlock configuration: {source}")]
     Resolve {
         #[source]
         source: ResolveError,
@@ -31,12 +31,12 @@ pub enum ProfileErrorKind {
 }
 
 #[derive(Debug, Error)]
-#[error("Profile '{profile_name}' from {profile_dir}: {kind}")]
-pub struct ProfileError {
+#[error("Profile '{profile_name}' from {landlock_dir}: {kind}")]
+pub struct LandlockConfigError {
     pub profile_name: String,
-    pub profile_dir: PathBuf,
+    pub landlock_dir: PathBuf,
     #[source]
-    pub kind: ProfileErrorKind,
+    pub kind: LandlockConfigErrorKind,
 }
 
 #[derive(Debug, Deserialize, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -127,7 +127,7 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     #[error(transparent)]
-    Profile(#[from] ProfileError),
+    LandlockConfig(#[from] LandlockConfigError),
 }
 
 // Handle empty profile files.  This is useful to validate a profile without context.
@@ -350,21 +350,24 @@ impl IslandConfig {
     }
 
     /// Loads landlock configuration for a profile by name.
-    pub fn load_landlock_config(&self, profile_name: &str) -> Result<ResolvedConfig, ProfileError> {
-        let profile_dir = self.profiles_dir.join(profile_name).join("landlock");
+    pub fn load_landlock_config(
+        &self,
+        profile_name: &str,
+    ) -> Result<ResolvedConfig, LandlockConfigError> {
+        let landlock_dir = self.profiles_dir.join(profile_name).join("landlock");
 
         // Parse the configuration with profile-specific error context.
-        Config::parse_directory(&profile_dir, ConfigFormat::Toml)
-            .map_err(|source| ProfileError {
+        Config::parse_directory(&landlock_dir, ConfigFormat::Toml)
+            .map_err(|source| LandlockConfigError {
                 profile_name: profile_name.to_string(),
-                profile_dir: profile_dir.clone(),
-                kind: ProfileErrorKind::Parse { source },
+                landlock_dir: landlock_dir.clone(),
+                kind: LandlockConfigErrorKind::Parse { source },
             })?
             .resolve()
-            .map_err(|source| ProfileError {
+            .map_err(|source| LandlockConfigError {
                 profile_name: profile_name.to_string(),
-                profile_dir: profile_dir.clone(),
-                kind: ProfileErrorKind::Resolve { source },
+                landlock_dir,
+                kind: LandlockConfigErrorKind::Resolve { source },
             })
     }
 
