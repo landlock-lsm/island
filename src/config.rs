@@ -21,6 +21,10 @@ pub const ISLAND_DEFAULT_CONFIG_BASE_NAME: &str = "island-default-base.toml";
 pub const ISLAND_DEFAULT_CONFIG_BASE_CONTENT: &str =
     include_str!("../assets/landlock/island-default-base.toml");
 
+pub const ISLAND_CUSTOM_CONFIG_NAME: &str = "island-custom.toml";
+pub const ISLAND_CUSTOM_CONFIG_HEADER_CONTENT: &str =
+    include_str!("../assets/landlock/island-custom-header.toml");
+
 fn check_profile_default<L>(profile_guard: &ProfileGuard<L>) -> io::Result<Option<PathBuf>>
 where
     L: ProfileLock,
@@ -478,6 +482,26 @@ impl IslandConfig {
     pub fn profile_names(&self) -> impl Iterator<Item = &String> + '_ {
         self.profiles.keys()
     }
+}
+
+pub fn generate_path_beneath_rule(allowed_access: &[String], parent: &[String]) -> String {
+    let parent_paths = parent
+        .iter()
+        .map(|path| format!("    {}", toml::Value::String(path.clone())))
+        .collect::<Vec<_>>()
+        .join(",\n")
+        + ",";
+
+    let allowed_accesses = allowed_access
+        .iter()
+        .map(|access| format!("{}", toml::Value::String(access.clone())))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "[[path_beneath]]\nallowed_access = [{}]\nparent = [\n{}\n]\n",
+        allowed_accesses, parent_paths
+    )
 }
 
 #[cfg(test)]
