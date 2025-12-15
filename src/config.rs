@@ -201,9 +201,8 @@ where
     }
 
     // Check for common CLI special characters.
-    name_str.chars().all(|c| {
-        c != '$' && c != '*' && c != '|' && c != '&' && c != ';' && c != '<' && c != '>' && c != '`'
-    })
+    let excluded = ['$', '&', '*', ':', ';', '<', '>', '`', '|'];
+    name_str.chars().all(|c| !excluded.contains(&c))
 }
 
 type Profiles = BTreeMap<String, Profile>;
