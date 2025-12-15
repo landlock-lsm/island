@@ -90,6 +90,7 @@ mod shell_hook {
             test_alias_collision,
             test_alias_eval,
             test_nosandbox,
+            test_precmd_cleanup,
         }
     }
 }

@@ -142,7 +142,10 @@ function _island_wrap_cmd() {
         return
     fi
 
-    if (( ${_ISLAND_WRAPPED_CMDS[(Ie)$cmd]} )); then
+    # Check if the command is already wrapped.  (I) returns the index of the
+    # match, or 0 if not found.  (e) performs an exact string match (no
+    # globbing).
+    if (( ${_ISLAND_WRAPPED_CMDS[(Ie)${(q)cmd}]} )); then
         return
     fi
 
@@ -166,6 +169,13 @@ function _island_accept_line() {
     if (( ${#_ISLAND_PROFILES} == 0 )); then
         zle _island_orig_accept_line
         return
+    fi
+
+    # Safety cleanup in case precmd was skipped (e.g., because a wrapped command
+    # was called, or the hook has been removed) or interrupted, before the
+    # following reset.
+    if (( ${#_ISLAND_WRAPPED_CMDS} )); then
+        _island_precmd
     fi
 
     typeset -g -a _ISLAND_WRAPPED_CMDS=()
@@ -213,8 +223,9 @@ function _island_precmd() {
     emulate -L zsh
 
     local cmd
-    for cmd in "${_ISLAND_WRAPPED_CMDS[@]-}"; do
-        unfunction "$cmd" 2>/dev/null
+    for cmd in "${_ISLAND_WRAPPED_CMDS[@]}"; do
+        [[ -n "$cmd" ]] || continue
+        unfunction "${(Q)cmd}"
     done
     unset _ISLAND_WRAPPED_CMDS
 }

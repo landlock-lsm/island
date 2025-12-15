@@ -209,6 +209,29 @@ test_nosandbox() {
     tap_pass
 }
 
+test_precmd_cleanup() {
+    tap_start "Cleanup of wrapped commands"
+    cleanup
+
+    # Simulate a state where precmd was skipped.
+    _ISLAND_PROFILES=("default")
+    function old_cmd() { echo "old"; }
+    _ISLAND_WRAPPED_CMDS=("old_cmd")
+
+    # Set BUFFER to a new command to trigger accept_line logic.
+    BUFFER="ls"
+
+    _island_accept_line
+
+    if functions old_cmd >/dev/null; then
+        tap_fail "old_cmd wrapper was not cleaned up"
+    fi
+
+    assert_wrapped "ls"
+
+    tap_pass
+}
+
 TESTS=(
     test_simple_external
     test_simple_alias
@@ -224,6 +247,7 @@ TESTS=(
     test_alias_collision
     test_alias_eval
     test_nosandbox
+    test_precmd_cleanup
 )
 
 tap_run "$@"
