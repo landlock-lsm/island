@@ -43,6 +43,27 @@
 # - No support for functions.  This includes things like the built-in `ls`
 #   and `ll`, `man`, etc.  (They will still work, but won't be sandboxed.)
 #
+# - fish functions does not support streaming output when inside a
+#   pipeline (all outputs are buffered and printed at once at exit) [1][2].
+#   This means that with this hook, a command like
+#
+#     base64 /dev/urandom | head
+#
+#   will show nothing and eventually run out of memory, since `base64`
+#   (and `head`) is redefined to be a function.  `nosandbox` does not help
+#   here, to work around this, you need to use `command` on either side:
+#
+#     command base64 /dev/urandom | head
+#     base64 /dev/urandom | command head
+#
+#   alternatively, to still sandbox both end of the pipe, you can manually
+#   start a one-off shell:
+#
+#     fish -c 'base64 /dev/urandom | head'
+#
+#  [1]: https://github.com/fish-shell/fish-shell/issues/1396
+#  [2]: https://github.com/fish-shell/fish-shell/issues/5635
+#
 # # Note
 # - Fish has no ${(z)BUFFER} equivalent (`commandline --tokens-expanded` /
 #   `commandline -o` drops operators), and so this file implements a
