@@ -95,6 +95,28 @@ mod shell_hook {
     }
 }
 
+mod shell_hook_fish {
+    run_tests! {
+        "tests/shell/test_hook.fish",
+        {
+            test_profiles_tracking,
+            test_path_rewrite,
+            test_path_rewrite_quoted,
+            test_path_rewrite_escaped,
+            test_path_rewrite_space,
+            test_quoted_command_wrapping,
+            test_nosandbox,
+            test_and_variants,
+            test_pipe_wrapping,
+            test_redirections,
+            test_invalid_commandline,
+            test_cleanup_event,
+            test_island_refreshes_profiles,
+            test_paging_mode_skip,
+        }
+    }
+}
+
 mod create {
     run_tests! {
         "tests/commands/test_create.sh",
