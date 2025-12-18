@@ -161,6 +161,34 @@ function test_nosandbox
     tap_pass
 end
 
+function test_nosandbox_with_separator
+    tap_start "nosandbox flag doesn't persist after separator"
+    setup
+    set -g _ISLAND_PROFILES profile1
+
+    set -g __island_cmdline_buffer "nosandbox head; tail"
+    _island_accept_line
+    assert_not_contains head "command with nosandbox should not be wrapped" $_ISLAND_WRAPPED_CMDS
+    assert_contains tail "command after separator should be wrapped" $_ISLAND_WRAPPED_CMDS
+
+    set -g __island_cmdline_buffer "nosandbox /bin/echo hi; /bin/cat file"
+    _island_accept_line
+    assert_eq "$__island_cmdline_buffer" "nosandbox /bin/echo hi; island run -- /bin/cat file" "Second command after separator should be wrapped"
+    assert_not_contains /bin/echo "first command with nosandbox should not be wrapped" $_ISLAND_WRAPPED_CMDS
+
+    set -g __island_cmdline_buffer "nosandbox head" "tail"
+    _island_accept_line
+    assert_not_contains head "command with nosandbox should not be wrapped" $_ISLAND_WRAPPED_CMDS
+    assert_contains tail "command after newline should be wrapped" $_ISLAND_WRAPPED_CMDS
+
+    set -g __island_cmdline_buffer "nosandbox /bin/head" "/bin/tail"
+    _island_accept_line
+    # Test harness joins multiline output
+    assert_eq "$__island_cmdline_buffer" "nosandbox /bin/head island run -- /bin/tail" "Second command after newline should be wrapped"
+
+    tap_pass
+end
+
 function test_operators
     tap_start "Shell operators && and ||"
     setup
@@ -339,6 +367,7 @@ set TESTS \
     test_path_rewrite_space \
     test_quoted_command_wrapping \
     test_nosandbox \
+    test_nosandbox_with_separator \
     test_operators \
     test_and_variants \
     test_pipe_wrapping \
