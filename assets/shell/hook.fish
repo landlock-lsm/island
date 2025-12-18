@@ -113,7 +113,7 @@ function _island_wrap_cmd --argument-names cmd
         end
     end
 
-    set escaped (string escape -- $cmd)
+    set -l escaped (string escape -- $cmd)
 
     eval "
     function $escaped --wraps $escaped
@@ -169,7 +169,6 @@ function _island_accept_line
     if commandline --paging-mode
         return
     end
-
 
     set -l output_lines
     set -l curr_line_out ""
@@ -316,14 +315,16 @@ function _island_accept_line
             set -l remaining (string sub -s $i -- $line)
             set -l sep_len 0
             set -l sep_value ""
+
+            # Order matters here - when two operators share a prefix,
+            # match the longer one first.
             set -l separator_specs \
-                "^\n" \
                 "^;" \
-                "^&" \
                 "^&&" \
+                "^&\\|" \
+                "^&" \
                 "^\\|\\|" \
                 "^\\|" \
-                "^&\\|" \
                 "^\\d+>\\|"
 
             for spec in $separator_specs
@@ -338,6 +339,7 @@ function _island_accept_line
             if test $sep_len -gt 0
                 _island_process_curr_token
                 set expecting_cmd 1
+                set curr_cmd_nosandbox 0
                 set curr_line_out "$curr_line_out$sep_value"
                 set i (math $i + $sep_len)
                 continue
@@ -369,6 +371,7 @@ function _island_accept_line
         set output_lines $output_lines $curr_line_out
         set curr_line_out ""
         set expecting_cmd 1
+        set curr_cmd_nosandbox 0
     end
 
     if test $modified -eq 1
@@ -438,6 +441,8 @@ function _island_unhook
     end
 
     functions -e _island_accept_line
+    functions -e _island_accept_line_normal
+    functions -e _island_accept_line_vi
     functions -e _island_chpwd
     functions -e _island_precmd
     functions -e _island_unhook
