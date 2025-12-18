@@ -1,34 +1,11 @@
 #!/usr/bin/env fish
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 
-set -g TEST_NUM 0
-set -g CURRENT_TEST_DESC ""
-
-function tap_start --argument-names desc
-    set -g TEST_NUM (math $TEST_NUM + 1)
-    set -g CURRENT_TEST_DESC $desc
-end
-
-function tap_debug --argument-names msg
-    echo "# DEBUG: $msg" >&2
-end
-
-function tap_fail --argument-names msg
-    echo "not ok $TEST_NUM - $CURRENT_TEST_DESC: $msg"
-    exit 1
-end
-
-function tap_pass
-    echo "ok $TEST_NUM - $CURRENT_TEST_DESC"
-end
-
-function tap_plan --argument-names count
-    echo "1..$count"
-end
-
 set -gx HOME (mktemp -d)
 set -l SCRIPT_DIR (dirname (status filename))
 set -l HOOK_SCRIPT "$SCRIPT_DIR/../../assets/shell/hook.fish"
+
+source "$SCRIPT_DIR/../tap.fish"
 
 set -x PATH "$SCRIPT_DIR/test_stub:$PATH"
 
@@ -48,7 +25,9 @@ function commandline
                 return 1
             end
         case "--current-buffer"
-            printf "%s" "$__island_cmdline_buffer"
+            for line in $__island_cmdline_buffer
+                echo $line
+            end
             return 0
         case "--replace"
             set -l idx 2
@@ -114,7 +93,7 @@ function test_profiles_tracking
     set -gx ISLAND_STATUS_EXIT 1
     _island_chpwd
     if set -q _ISLAND_PROFILES[1]
-        tap_fail "_ISLAND_PROFILES not cleared on failure"
+        tap_fail "_ISLAND_PROFILES not cleared on island status error"
     end
     tap_pass
 end
@@ -122,7 +101,7 @@ end
 function test_path_rewrite
     tap_start "Path command rewrites buffer"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "/bin/echo hi"
     _island_accept_line
     assert_eq "$__island_cmdline_buffer" "island run -- /bin/echo hi" "Buffer not rewritten"
@@ -132,7 +111,7 @@ end
 function test_path_rewrite_quoted
     tap_start "Path rewrite preserves quoting"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "./'my binary' arg"
     _island_accept_line
     assert_eq "$__island_cmdline_buffer" "island run -- ./'my binary' arg" "Quoted path not rewritten"
@@ -142,7 +121,7 @@ end
 function test_path_rewrite_escaped
     tap_start "Path rewrite handles escaped spaces"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "./my\\ binary"
     _island_accept_line
     assert_eq "$__island_cmdline_buffer" "island run -- ./my\\ binary" "Escaped path not rewritten"
@@ -152,7 +131,7 @@ end
 function test_path_rewrite_space
     tap_start "Path rewrite handles space-quoted path"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "./my binary"
     _island_accept_line
     assert_eq "$__island_cmdline_buffer" "island run -- ./my binary" "Space path not rewritten"
@@ -162,7 +141,7 @@ end
 function test_quoted_command_wrapping
     tap_start "Quoted args keep command wrapping"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     functions -e ls 2>/dev/null
     set -g __island_cmdline_buffer "ls \"file with >> weird name\""
     _island_accept_line
@@ -174,7 +153,7 @@ end
 function test_nosandbox
     tap_start "nosandbox bypasses wrapping"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "nosandbox /bin/echo hi"
     _island_accept_line
     assert_eq "$__island_cmdline_buffer" "nosandbox /bin/echo hi" "Buffer should remain unchanged"
@@ -182,10 +161,59 @@ function test_nosandbox
     tap_pass
 end
 
+function test_operators
+    tap_start "Shell operators && and ||"
+    setup
+    set -g _ISLAND_PROFILES profile1
+
+    # Test && operator with spaces
+    set -g __island_cmdline_buffer "head a && tail b"
+    _island_accept_line
+    assert_contains head "first command not wrapped with &&" $_ISLAND_WRAPPED_CMDS
+    assert_contains tail "command not wrapped after &&" $_ISLAND_WRAPPED_CMDS
+
+    # Test || operator with spaces
+    set -g __island_cmdline_buffer "head a || tail b"
+    _island_accept_line
+    assert_contains head "first command not wrapped with ||" $_ISLAND_WRAPPED_CMDS
+    assert_contains tail "command not wrapped after ||" $_ISLAND_WRAPPED_CMDS
+
+    # Test || operator without spaces
+    set -g __island_cmdline_buffer "head||tail"
+    _island_accept_line
+    assert_contains head "head not wrapped with ||" $_ISLAND_WRAPPED_CMDS
+    assert_contains tail "tail not wrapped after || without spaces" $_ISLAND_WRAPPED_CMDS
+
+    # Test && operator without spaces
+    set -g __island_cmdline_buffer "head&&tail"
+    _island_accept_line
+    assert_contains head "head not wrapped with &&" $_ISLAND_WRAPPED_CMDS
+    assert_contains tail "tail not wrapped after && without spaces" $_ISLAND_WRAPPED_CMDS
+
+    # Test || in double quotes (should not be treated as separator)
+    set -g __island_cmdline_buffer "head \"||\" tail"
+    _island_accept_line
+    assert_contains head "head not wrapped when || is quoted" $_ISLAND_WRAPPED_CMDS
+    assert_not_contains tail "tail should not be wrapped when || is in quotes" $_ISLAND_WRAPPED_CMDS
+
+    # Test && in single quotes (should not be treated as separator)
+    set -g __island_cmdline_buffer "'head&&tail'"
+    _island_accept_line
+    assert_not_contains head "head should not be wrapped when inside single quotes" $_ISLAND_WRAPPED_CMDS
+    assert_not_contains tail "tail should not be wrapped when inside single quotes" $_ISLAND_WRAPPED_CMDS
+
+    set -g __island_cmdline_buffer '"head&&tail"'
+    _island_accept_line
+    assert_not_contains head "head should not be wrapped when inside double quotes" $_ISLAND_WRAPPED_CMDS
+    assert_not_contains tail "tail should not be wrapped when inside double quotes" $_ISLAND_WRAPPED_CMDS
+
+    tap_pass
+end
+
 function test_and_variants
     tap_start "Logical and separators"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
 
     set -g __island_cmdline_buffer "head a; and tail b"
     _island_accept_line
@@ -204,7 +232,7 @@ end
 function test_pipe_wrapping
     tap_start "Wrapping with pipe variants"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "echo hi &| cat 2>| head"
     _island_accept_line
     tap_debug "Wrapped: $_ISLAND_WRAPPED_CMDS"
@@ -216,7 +244,7 @@ end
 function test_redirections
     tap_start "Redirections split tokens without new command"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     functions -e ls 2>/dev/null
 
     set -g __island_cmdline_buffer "ls>a"
@@ -245,7 +273,7 @@ end
 function test_invalid_commandline
     tap_start "Invalid commandline skips wrapping"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "echo 'unterminated"
     set -g __island_cmdline_valid_status 2
     _island_accept_line
@@ -259,7 +287,7 @@ end
 function test_cleanup_event
     tap_start "Cleanup on fish_prompt event"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     _island_wrap_cmd cat
     if not functions -q cat
         tap_fail "Wrapper function missing before cleanup"
@@ -278,20 +306,20 @@ end
 function test_island_refreshes_profiles
     tap_start "island function refreshes profiles"
     setup
-    set -gx ISLAND_STATUS_OUTPUT "first"
+    set -gx ISLAND_STATUS_OUTPUT "profile1"
     _island_chpwd
-    assert_eq "$_ISLAND_PROFILES" "first" "Initial profiles mismatch"
+    assert_eq "$_ISLAND_PROFILES" "profile1" "Initial profiles mismatch"
 
-    set -gx ISLAND_STATUS_OUTPUT "second"
+    set -gx ISLAND_STATUS_OUTPUT "profile2"
     island status >/dev/null 2>&1
-    assert_eq "$_ISLAND_PROFILES" "second" "Profiles not refreshed"
+    assert_eq "$_ISLAND_PROFILES" "profile2" "Profiles not refreshed"
     tap_pass
 end
 
 function test_paging_mode_skip
     tap_start "Paging mode skips hook processing"
     setup
-    set -g _ISLAND_PROFILES alpha
+    set -g _ISLAND_PROFILES profile1
     set -g __island_cmdline_buffer "/bin/echo hi"
     set -g __island_cmdline_paging_mode 1  # Paging mode active (returns 0 = true)
     _island_accept_line
@@ -311,6 +339,7 @@ set TESTS \
     test_path_rewrite_space \
     test_quoted_command_wrapping \
     test_nosandbox \
+    test_operators \
     test_and_variants \
     test_pipe_wrapping \
     test_redirections \
@@ -319,25 +348,4 @@ set TESTS \
     test_island_refreshes_profiles \
     test_paging_mode_skip
 
-if test (count $argv) -gt 0
-    if test "$argv[1]" = "--check-count"
-        set -l expected $argv[2]
-        if test (count $TESTS) -ne $expected
-            echo "Error: Expected $expected tests, but found "(count $TESTS)"."
-            exit 1
-        end
-        exit 0
-    end
-
-    set -l test_name $argv[1]
-    if not contains -- $test_name $TESTS
-        tap_fail "Unknown test $test_name"
-    end
-    $test_name
-    exit 0
-end
-
-tap_plan (count $TESTS)
-for t in $TESTS
-    eval $t
-end
+tap_run $argv
