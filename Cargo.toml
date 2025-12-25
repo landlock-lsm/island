@@ -14,8 +14,10 @@ clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
 landlock = "0.4.3"
 landlockconfig = { git = "https://github.com/landlock-lsm/landlockconfig", rev = "8b6b59b339181f9fa1ec6f7889564ba154c1a47d" }
+lddtree = "0.3.8"
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 tempfile = "3.8"
 thiserror = "2.0"
 toml = "0.8"
+which = "8.0.0"

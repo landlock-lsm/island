@@ -2,7 +2,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::generate;
-use landlock::RulesetError;
+use landlock::{path_beneath_rules, AccessFs, RulesetCreatedAttr, RulesetError};
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
 use std::{
     collections::BTreeMap,
@@ -16,9 +16,11 @@ use std::{
 use thiserror::Error;
 
 mod config;
-use config::{is_profile_name_valid, ConfigError, IslandConfig, ResolvedProfile};
+use config::{is_profile_name_valid, merge_no_dependency, ConfigError, IslandConfig, NoDependency, ResolvedProfile};
 
 mod context;
+
+mod elf;
 
 mod lock;
 
@@ -212,6 +214,12 @@ enum IslandError {
 
     #[error(transparent)]
     Ruleset(#[from] RulesetError),
+
+    #[error(transparent)]
+    LddTree(#[from] lddtree::Error),
+
+    #[error(transparent)]
+    WhichError(#[from] which::Error),
 }
 
 fn run(
@@ -257,6 +265,27 @@ fn run(
     let workspace_manager =
         last_profile.workspace_manager(island_config, verbose, |s| env::var(s))?;
 
+    let merged_no_dependency = merge_no_dependency(resolved_profiles.iter().map(|p| p.profile));
+    let disable_elf_dependency_resolution = merged_no_dependency.contains(&NoDependency::Elf);
+
+    // Resolve and allow shared library dependencies.
+    let absolute_command_path = if Path::new(&command_args[0]).is_absolute() {
+        PathBuf::from(&command_args[0])
+    } else {
+        which::which(&command_args[0])?
+    };
+    let command_path = try_canonicalize(absolute_command_path)?;
+    verbose.print(|| format!("Resolved command path: {}", command_path.display()));
+
+    let lddtree_paths = elf::resolve_command_dependency_paths(
+        command_path,
+        disable_elf_dependency_resolution,
+        verbose,
+    )?;
+    for path in &lddtree_paths {
+        verbose.print(|| format!("Allowing dependency path: {}", path.display()));
+    }
+
     // Apply each profile's restrictions in order (broadest scope first).
     for resolved_profile in resolved_profiles {
         let (mut ruleset, rule_errors) = resolved_profile.config.build_ruleset()?;
@@ -269,6 +298,17 @@ fn run(
         // restrictions - if any parent ruleset doesn't allow workspace access,
         // child rulesets can't grant it either.
         ruleset = workspace_manager.update_ruleset(ruleset, verbose)?;
+
+        // Add lddtree library paths to allow executing the command and its dependencies.
+        // If no_dependency disables ELF dependency resolution, this list is empty and we
+        // intentionally do not add any auto-allow rules.
+        if !lddtree_paths.is_empty() {
+            let lddtree_rules = path_beneath_rules(
+                lddtree_paths.iter().cloned(),
+                AccessFs::ReadFile | AccessFs::Execute,
+            );
+            ruleset = ruleset.add_rules(lddtree_rules)?;
+        }
 
         // TODO: Do not rely on the kernel to enforce nested sandboxing (limited to 16 layers).
         ruleset.restrict_self()?;

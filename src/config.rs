@@ -17,6 +17,12 @@ use std::{
 };
 use thiserror::Error;
 
+#[derive(Debug, Deserialize, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoDependency {
+    Elf,
+}
+
 pub const ISLAND_DEFAULT_CONFIG_BASE_NAME: &str = "island-default-base.toml";
 pub const ISLAND_DEFAULT_CONFIG_BASE_CONTENT: &str =
     include_str!("../assets/landlock/island-default-base.toml");
@@ -158,6 +164,7 @@ struct ProfileConfig {
     #[serde(rename = "context")]
     contexts: Option<Vec<TomlContextEntry>>,
     env: Option<Vec<Env>>,
+    no_dependency: Option<Vec<NoDependency>>,
     workspace: Option<bool>,
 }
 
@@ -170,7 +177,19 @@ struct TomlContextEntry {
 pub struct Profile {
     pub contexts: ContextSet,
     pub env_vars: BTreeSet<Env>,
+    pub no_dependency: BTreeSet<NoDependency>,
     pub workspace: bool,
+}
+
+pub fn merge_no_dependency<'a, I>(profiles: I) -> BTreeSet<NoDependency>
+where
+    I: IntoIterator<Item = &'a Profile>,
+{
+    let mut merged = BTreeSet::<NoDependency>::new();
+    for profile in profiles {
+        merged.extend(profile.no_dependency.iter().copied());
+    }
+    merged
 }
 
 // Profile names should be trusted, but let's enforce some basic sanity checks
@@ -315,6 +334,10 @@ impl IslandConfig {
         }
 
         profile.env_vars.extend(cfg.env.unwrap_or_default());
+
+        profile
+            .no_dependency
+            .extend(cfg.no_dependency.unwrap_or_default());
 
         profile.workspace = cfg.workspace.unwrap_or(true);
 
@@ -549,6 +572,45 @@ when_beneath = "/home/user/projects/work1"
     #[test]
     fn test_empty_profile() {
         create_test_config_with_profiles([("empty", "")]);
+    }
+
+    #[test]
+    fn test_parse_no_dependency_elf() {
+        let config = create_test_config_with_profiles([(
+            "p",
+            r#"
+no_dependency = ["elf"]
+"#,
+        )]);
+
+        let profile = config.profiles.get("p").unwrap();
+        assert!(profile.no_dependency.contains(&NoDependency::Elf));
+    }
+
+    #[test]
+    fn test_parse_no_dependency_invalid_value() {
+        let config = IslandConfig::default();
+        let err = config
+            .parse_profile_config(
+                r#"
+no_dependency = ["not-a-real-option"]
+"#,
+                "p",
+                |p| Ok(p.to_path_buf()),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, ConfigError::TomlParse(_)));
+    }
+
+    #[test]
+    fn test_merge_no_dependency_unions_options() {
+        let mut p1 = Profile::default();
+        p1.no_dependency.insert(NoDependency::Elf);
+        let p2 = Profile::default();
+
+        let merged = merge_no_dependency([&p1, &p2]);
+        assert_eq!(merged, BTreeSet::from([NoDependency::Elf]));
     }
 
     #[test]
