@@ -21,6 +21,7 @@ parent = [
     "/lib",
     "/sbin",
     "/usr",
+    "/nix/store",
 ]
 
 # Safe writable devices.
