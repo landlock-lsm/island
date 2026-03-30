@@ -2,7 +2,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::generate;
-use landlock::RulesetError;
+use landlock::{RestrictSelfFlag, RulesetError};
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
 use std::{
     collections::BTreeMap,
@@ -83,6 +83,13 @@ enum Commands {
                 resolution based on current working directory is disabled."
         )]
         profile: Vec<String>,
+
+        #[arg(
+            short,
+            long,
+            help = "Log access failures to system audit log. Requires Linux 6.15+.",
+        )]
+        log_access_failures: bool,
 
         #[arg(
             long,
@@ -220,6 +227,7 @@ fn run(
     command_args: &[String],
     ignore_missing_profile: bool,
     verbose: &Verbose,
+    log_access_failures: bool,
 ) -> Result<(), IslandError> {
     verbose.print(|| {
         format!(
@@ -271,7 +279,11 @@ fn run(
         ruleset = workspace_manager.update_ruleset(ruleset, verbose)?;
 
         // TODO: Do not rely on the kernel to enforce nested sandboxing (limited to 16 layers).
-        ruleset.restrict_self()?;
+        if log_access_failures {
+            ruleset.restrict_self_with_flags(RestrictSelfFlag::LogNewExecOn.into())?;
+        } else {
+            ruleset.restrict_self()?;
+        }
 
         // Set environment variables defined by profile.  When using context
         // inference (e.g. resolve_profiles_by_path), the environment variables
@@ -344,6 +356,7 @@ fn main() -> Result<(), IslandError> {
             profile,
             command,
             ignore_missing_profile,
+            log_access_failures,
         } => {
             let island_config = IslandConfig::new(|s| std::env::var(s))?;
             let resolved_profiles = resolve_profiles(&island_config, &profile, &verbose)?;
@@ -354,6 +367,7 @@ fn main() -> Result<(), IslandError> {
                 &command,
                 ignore_missing_profile,
                 &verbose,
+                log_access_failures,
             )
         }
         Commands::Status => {

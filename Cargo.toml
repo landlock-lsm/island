@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 homepage = "https://landlock.io"
-repository = "https://github.com/landlock-lsm/landlockconfig"
+repository = "https://github.com/landlock-lsm/island"
 keywords = ["access-control", "linux", "sandbox", "security"]
 exclude = [".gitignore"]
 
