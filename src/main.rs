@@ -2,7 +2,7 @@
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::generate;
-use landlock::RulesetError;
+use landlock::{RulesetCreatedAttr, RulesetError};
 use landlockconfig::{BuildRulesetError, ParseDirectoryError, ResolveError, ResolvedConfig};
 use std::{
     collections::BTreeMap,
@@ -89,6 +89,19 @@ enum Commands {
             help = "Execute command without sandboxing if no profile is found"
         )]
         ignore_missing_profile: bool,
+
+        #[arg(
+            short,
+            long,
+            help = "Enable audit logging of denied accesses",
+            long_help = "Without this flag, accesses blocked by the sandbox are silent: the \
+                sandboxed program may misbehave with no trace of why.  Enabling --log-audit \
+                writes those denials to the kernel audit log (visible via dmesg or auditd), \
+                so you can diagnose what the sandbox is blocking.  Requires Landlock ABI v7 \
+                (Linux 6.15 or later); on older kernels Island prints a warning and \
+                continues without audit logging."
+        )]
+        log_audit: bool,
 
         #[arg(
             trailing_var_arg = true,
@@ -219,6 +232,7 @@ fn run(
     island_config: &IslandConfig,
     command_args: &[String],
     ignore_missing_profile: bool,
+    log_audit: bool,
     verbose: &Verbose,
 ) -> Result<(), IslandError> {
     verbose.print(|| {
@@ -257,6 +271,10 @@ fn run(
     let workspace_manager =
         last_profile.workspace_manager(island_config, verbose, |s| env::var(s))?;
 
+    // Track whether the kernel honored --log-audit so we warn at most once
+    // per Island run regardless of how many profile layers are applied.
+    let mut log_audit_warned = false;
+
     // Apply each profile's restrictions in order (broadest scope first).
     for resolved_profile in resolved_profiles {
         let (mut ruleset, rule_errors) = resolved_profile.config.build_ruleset()?;
@@ -270,8 +288,31 @@ fn run(
         // child rulesets can't grant it either.
         ruleset = workspace_manager.update_ruleset(ruleset, verbose)?;
 
+        // Enable audit logging of post-execve denials on each layer so the
+        // sandboxed program's own denials are visible.  On kernels older than
+        // Landlock ABI v7 this is a silent no-op thanks to the default
+        // BestEffort compatibility level.
+        if log_audit {
+            verbose.print(|| {
+                format!(
+                    "Enabling audit logging for profile {}",
+                    resolved_profile.name,
+                )
+            });
+            ruleset = ruleset.log_new_exec(true)?;
+        }
+
         // TODO: Do not rely on the kernel to enforce nested sandboxing (limited to 16 layers).
-        ruleset.restrict_self()?;
+        let restriction_status = ruleset.restrict_self()?;
+
+        if log_audit && !restriction_status.log_new_exec && !log_audit_warned {
+            eprintln!(
+                "Warning: --log-audit requires Landlock ABI v7 (Linux 6.15 or later); \
+                 the running kernel does not support it and accesses blocked by the \
+                 sandbox will not be written to the audit log."
+            );
+            log_audit_warned = true;
+        }
 
         // Set environment variables defined by profile.  When using context
         // inference (e.g. resolve_profiles_by_path), the environment variables
@@ -344,6 +385,7 @@ fn main() -> Result<(), IslandError> {
             profile,
             command,
             ignore_missing_profile,
+            log_audit,
         } => {
             let island_config = IslandConfig::new(|s| std::env::var(s))?;
             let resolved_profiles = resolve_profiles(&island_config, &profile, &verbose)?;
@@ -353,6 +395,7 @@ fn main() -> Result<(), IslandError> {
                 &island_config,
                 &command,
                 ignore_missing_profile,
+                log_audit,
                 &verbose,
             )
         }
