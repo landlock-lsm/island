@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+
+# A mocked island command for shell hook testing
+case "$1" in
+    status)
+        echo "$ISLAND_STATUS_OUTPUT"
+        exit "${ISLAND_STATUS_EXIT:-0}"
+        ;;
+    run)
+        if [ -n "$ISLAND_RUN_LOG" ]; then
+            echo "$2" >>"$ISLAND_RUN_LOG"
+        fi
+        exit 0
+        ;;
+esac
+exit 0

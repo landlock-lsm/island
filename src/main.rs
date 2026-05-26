@@ -43,6 +43,7 @@ impl Verbose {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum HookShell {
     Zsh,
+    Fish,
 }
 
 // Only list shells running on Linux.
@@ -126,10 +127,10 @@ enum Commands {
     #[command(
         about = "Print shell integration script",
         long_about = "Output a shell script that can be sourced to integrate island with your shell. \
-            Currently supports Zsh."
+            Supports Zsh and Fish."
     )]
     Hook {
-        #[arg(help = "Shell to generate integration for (currently only Zsh is supported)")]
+        #[arg(help = "Shell to generate integration for (zsh or fish)")]
         shell: HookShell,
 
         #[arg(long, help = "Output the script to remove the shell integration")]
@@ -421,6 +422,13 @@ fn main() -> Result<(), IslandError> {
                         println!("_island_unhook 2>/dev/null || :");
                     } else {
                         println!("{}", include_str!("../assets/shell/hook.zsh"));
+                    }
+                }
+                HookShell::Fish => {
+                    if undo {
+                        println!("_island_unhook 2>/dev/null; or true");
+                    } else {
+                        println!("{}", include_str!("../assets/shell/hook.fish"));
                     }
                 }
             }
