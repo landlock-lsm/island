@@ -115,6 +115,10 @@ function _island_wrap_cmd() {
                 shift words
             elif [[ "$word" == (nocorrect|noglob|exec|eval) ]]; then
                 shift words
+            elif [[ "$word" == command ]]; then
+                shift words
+                word="${words[1]}"
+                aliases[${(Q)cmd}]="${aliases[${(Q)cmd}]/command /}"
             else
                 break
             fi
