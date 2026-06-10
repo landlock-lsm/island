@@ -179,7 +179,22 @@ enum Commands {
         #[arg(long, help = "Update all profiles", conflicts_with = "profile")]
         all: bool,
     },
-    // TODO: Add profile management subcommands (list, show)
+
+    #[command(
+        about = "List all profiles",
+        long_about = "List all profiles defined in the Island configuration directory, along \
+            with the directories where each profile activates automatically (when_beneath)."
+    )]
+    List,
+
+    #[command(
+        about = "Delete a profile",
+        long_about = "Remove a profile and all its configuration files permanently."
+    )]
+    Delete {
+        #[arg(help = "Name of the profile to delete")]
+        name: String,
+    },
 }
 
 #[derive(Parser)]
@@ -500,6 +515,47 @@ fn main() -> Result<(), IslandError> {
                     island_config.update_profile_default(profile.name)?;
                 }
             }
+            Ok(())
+        }
+        Commands::List => {
+            let island_config = IslandConfig::new(|s| std::env::var(s))?;
+
+            let mut found = false;
+            for (name, profile) in island_config.profiles() {
+                found = true;
+                println!("{}", name);
+                for context in &profile.contexts {
+                    if let Some(path) = &context.when_beneath {
+                        println!("  {}", path.display());
+                    }
+                }
+            }
+
+            if !found {
+                verbose.print(|| "No profiles found".to_string());
+            }
+            Ok(())
+        }
+        Commands::Delete { name } => {
+            if !is_profile_name_valid(&name) {
+                return Err(IslandError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid profile name \"{}\"", name),
+                )));
+            }
+
+            let config_dir = IslandConfig::config_dir(|s| std::env::var(s))?;
+            let profile_dir = config_dir.join("profiles").join(&name);
+
+            if !profile_dir.exists() {
+                Err(IslandError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Profile \"{}\" not found", name),
+                )))?
+            }
+
+            fs::remove_dir_all(&profile_dir)?;
+            println!("Deleted profile \"{}\" from {}", name, profile_dir.display());
             Ok(())
         }
     }

@@ -98,6 +98,25 @@ fn test_profile_mini() {
 }
 
 #[test]
+fn test_profile_list() {
+    let read_env = get_read_env("mini-landlock-config");
+    let config = IslandConfig::new(&read_env).unwrap();
+
+    let profiles: Vec<_> = config.profiles().collect();
+    assert_eq!(profiles.len(), 1);
+
+    let (name, profile) = profiles[0];
+    assert_eq!(name, "foo");
+
+    let contexts: Vec<_> = profile
+        .contexts
+        .iter()
+        .filter_map(|c| c.when_beneath.as_ref())
+        .collect();
+    assert_eq!(contexts, vec![&std::path::PathBuf::from("/tmp")]);
+}
+
+#[test]
 fn test_workspace_manager_empty() {
     let source_profile = Profile::default();
 
