@@ -129,3 +129,14 @@ mod update {
         }
     }
 }
+
+mod delete {
+    run_tests! {
+        "tests/commands/test_delete.sh",
+        {
+            test_delete_existing,
+            test_delete_nonexistent,
+            test_delete_invalid_name,
+        }
+    }
+}

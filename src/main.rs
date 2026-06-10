@@ -179,7 +179,15 @@ enum Commands {
         #[arg(long, help = "Update all profiles", conflicts_with = "profile")]
         all: bool,
     },
-    // TODO: Add profile management subcommands (list, show)
+
+    #[command(
+        about = "Delete a profile",
+        long_about = "Remove a profile and all its configuration files permanently."
+    )]
+    Delete {
+        #[arg(help = "Name of the profile to delete")]
+        name: String,
+    },
 }
 
 #[derive(Parser)]
@@ -500,6 +508,28 @@ fn main() -> Result<(), IslandError> {
                     island_config.update_profile_default(profile.name)?;
                 }
             }
+            Ok(())
+        }
+        Commands::Delete { name } => {
+            if !is_profile_name_valid(&name) {
+                return Err(IslandError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid profile name \"{}\"", name),
+                )));
+            }
+
+            let config_dir = IslandConfig::config_dir(|s| std::env::var(s))?;
+            let profile_dir = config_dir.join("profiles").join(&name);
+
+            if !profile_dir.exists() {
+                Err(IslandError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Profile \"{}\" not found", name),
+                )))?
+            }
+
+            fs::remove_dir_all(&profile_dir)?;
+            println!("Deleted profile \"{}\" from {}", name, profile_dir.display());
             Ok(())
         }
     }
