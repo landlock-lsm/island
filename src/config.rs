@@ -477,6 +477,12 @@ impl IslandConfig {
     pub fn profile_names(&self) -> impl Iterator<Item = &String> + '_ {
         self.profiles.keys()
     }
+
+    /// Returns all profiles together with their parsed configuration, sorted by
+    /// profile name.
+    pub fn profiles(&self) -> impl Iterator<Item = (&String, &Profile)> + '_ {
+        self.profiles.iter()
+    }
 }
 
 #[cfg(test)]

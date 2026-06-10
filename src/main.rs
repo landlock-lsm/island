@@ -181,6 +181,13 @@ enum Commands {
     },
 
     #[command(
+        about = "List all profiles",
+        long_about = "List all profiles defined in the Island configuration directory, along \
+            with the directories where each profile activates automatically (when_beneath)."
+    )]
+    List,
+
+    #[command(
         about = "Delete a profile",
         long_about = "Remove a profile and all its configuration files permanently."
     )]
@@ -507,6 +514,25 @@ fn main() -> Result<(), IslandError> {
                 for profile in resolved_profiles {
                     island_config.update_profile_default(profile.name)?;
                 }
+            }
+            Ok(())
+        }
+        Commands::List => {
+            let island_config = IslandConfig::new(|s| std::env::var(s))?;
+
+            let mut found = false;
+            for (name, profile) in island_config.profiles() {
+                found = true;
+                println!("{}", name);
+                for context in &profile.contexts {
+                    if let Some(path) = &context.when_beneath {
+                        println!("  {}", path.display());
+                    }
+                }
+            }
+
+            if !found {
+                verbose.print(|| "No profiles found".to_string());
             }
             Ok(())
         }
