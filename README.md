@@ -59,6 +59,13 @@ $ ls
 bin  boot  dev	etc  home  [...]
 ```
 
+Fish shell users can use the following instead:
+
+```fish
+$ source (island completion fish | psub)
+$ source (island hook fish | psub)
+```
+
 ## How it works
 
 Profiles are stored in `~/.config/island/profiles/<name>/` and contain:
