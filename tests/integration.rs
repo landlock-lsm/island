@@ -91,6 +91,16 @@ mod shell_hook {
             test_alias_eval,
             test_nosandbox,
             test_precmd_cleanup,
+            test_option_words,
+            test_run_simple,
+            test_run_precommand,
+            test_run_compound,
+            test_run_substitution,
+            test_run_eval,
+            test_run_path,
+            test_run_parameter,
+            test_run_chdir,
+            test_run_not_sandboxed,
         }
     }
 }
